@@ -46,6 +46,12 @@ python -m src.main
 ### Docker Deployment
 
 ```bash
+# Clone and configure
+git clone https://github.com/Bittabola/nima-gap.git
+cd nima-gap
+cp .env.example .env
+# Edit .env with your credentials
+
 # Build and run
 docker compose -f docker/docker-compose.yml up -d
 
@@ -96,21 +102,6 @@ sources:
 - `/start` - Welcome message
 - `/status` - Show pending/approved counts
 - `/fetch` - Trigger manual fetch
-
-## Deployment
-
-To deploy on a VPS:
-
-```bash
-# On your server
-git clone https://github.com/Bittabola/nima-gap.git
-cd nima-gap
-cp .env.example .env
-# Edit .env with your credentials
-
-# Start with Docker
-docker compose -f docker/docker-compose.yml up -d
-```
 
 ## License
 
