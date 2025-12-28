@@ -18,7 +18,6 @@ A Telegram bot that curates feel-good human stories from around the world, trans
 - Python 3.11+
 - Docker (for deployment)
 - Telegram Bot Token (from @BotFather)
-- Reddit API credentials (from https://reddit.com/prefs/apps)
 - Google Gemini API key
 
 ### Local Development
@@ -71,8 +70,6 @@ docker compose -f docker/docker-compose.yml down
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `TELEGRAM_CHANNEL_ID` | Yes | Channel to publish to (@username or ID) |
 | `TELEGRAM_ADMIN_ID` | Yes | Your Telegram user ID |
-| `REDDIT_CLIENT_ID` | Yes | Reddit app client ID |
-| `REDDIT_CLIENT_SECRET` | Yes | Reddit app client secret |
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key |
 | `DATABASE_PATH` | No | SQLite database path (default: data/olamda.db) |
 | `FETCH_INTERVAL_HOURS` | No | Hours between fetches (default: 3) |

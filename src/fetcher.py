@@ -4,7 +4,6 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import asyncpraw
 import feedparser
 import httpx
 
@@ -31,16 +30,6 @@ def create_http_client() -> httpx.AsyncClient:
         headers={"User-Agent": "Olamda-Nima-Gap/1.0"},
     )
 
-
-async def create_reddit_client(
-    client_id: str, client_secret: str
-) -> asyncpraw.Reddit:
-    """Create asyncpraw Reddit client (read-only)."""
-    return asyncpraw.Reddit(
-        client_id=client_id,
-        client_secret=client_secret,
-        user_agent="Olamda-Nima-Gap/1.0 (by /u/olamda_bot)",
-    )
 
 
 async def fetch_rss(
@@ -91,28 +80,36 @@ async def fetch_rss(
 
 
 async def fetch_reddit(
-    reddit: asyncpraw.Reddit,
+    http_client: httpx.AsyncClient,
     subreddit_name: str,
     limit: int = 25,
 ) -> list[FetchedArticle]:
-    """Fetch text posts from a subreddit using asyncpraw."""
+    """Fetch text posts from a subreddit using Reddit's public .json endpoint."""
     articles = []
 
     try:
-        subreddit = await reddit.subreddit(subreddit_name)
+        url = f"https://www.reddit.com/r/{subreddit_name}/hot.json?limit={limit}"
+        response = await http_client.get(url)
+        response.raise_for_status()
 
-        async for submission in subreddit.hot(limit=limit):
+        data = response.json()
+
+        for post in data.get("data", {}).get("children", []):
+            post_data = post.get("data", {})
+
             # Skip non-text posts (images, videos, links)
-            if not submission.selftext:
+            selftext = post_data.get("selftext", "")
+            if not selftext:
                 continue
-            if submission.selftext in ("[removed]", "[deleted]"):
+            if selftext in ("[removed]", "[deleted]"):
                 continue
 
+            permalink = post_data.get("permalink", "")
             articles.append(
                 FetchedArticle(
-                    url=f"https://reddit.com{submission.permalink}",
-                    title=submission.title,
-                    content=submission.selftext,
+                    url=f"https://reddit.com{permalink}",
+                    title=post_data.get("title", ""),
+                    content=selftext,
                     image_url=None,  # Text posts don't have images
                 )
             )
@@ -126,7 +123,6 @@ async def fetch_reddit(
 async def fetch_source(
     source: dict,
     http_client: httpx.AsyncClient,
-    reddit: asyncpraw.Reddit,
 ) -> list[FetchedArticle]:
     """Fetch articles from a source based on its type."""
     source_type = source.get("type", "rss")
@@ -134,7 +130,7 @@ async def fetch_source(
     if source_type == "reddit":
         subreddit = source.get("subreddit")
         if subreddit:
-            return await fetch_reddit(reddit, subreddit)
+            return await fetch_reddit(http_client, subreddit)
     else:  # rss
         url = source.get("url")
         if url:

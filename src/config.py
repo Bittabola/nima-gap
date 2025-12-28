@@ -17,10 +17,6 @@ class Config:
     telegram_channel_id: str
     telegram_admin_id: int
 
-    # Reddit
-    reddit_client_id: str
-    reddit_client_secret: str
-
     # Gemini
     gemini_api_key: str
 
@@ -56,8 +52,6 @@ def load_config() -> Config:
         telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
         telegram_channel_id=os.environ["TELEGRAM_CHANNEL_ID"],
         telegram_admin_id=int(os.environ["TELEGRAM_ADMIN_ID"]),
-        reddit_client_id=os.environ["REDDIT_CLIENT_ID"],
-        reddit_client_secret=os.environ["REDDIT_CLIENT_SECRET"],
         gemini_api_key=os.environ["GEMINI_API_KEY"],
         database_path=os.getenv("DATABASE_PATH", "data/olamda.db"),
         fetch_interval_hours=int(os.getenv("FETCH_INTERVAL_HOURS", "3")),

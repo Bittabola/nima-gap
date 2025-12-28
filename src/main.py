@@ -28,14 +28,13 @@ from .database import (
     normalize_url,
     url_seen,
 )
-from .fetcher import create_http_client, create_reddit_client, fetch_source
+from .fetcher import create_http_client, fetch_source
 
 
 async def fetch_job(
     config,
     db_conn,
     http_client,
-    reddit,
     gemini_model,
     bot,
 ) -> int:
@@ -58,7 +57,7 @@ async def fetch_job(
     for source in config.sources:
         source_name = source.get("name", "Unknown")
         try:
-            articles = await fetch_source(source, http_client, reddit)
+            articles = await fetch_source(source, http_client)
             logger.info(f"Fetched {len(articles)} from {source_name}")
             for article in articles:
                 all_articles.append((source_name, article))
@@ -206,7 +205,7 @@ async def publish_job(config, db_conn, bot) -> None:
         logger.error(f"Failed to publish article {article.id}")
 
 
-async def scheduler_loop(config, db_conn, http_client, reddit, gemini_model, app):
+async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
     """Main scheduling loop."""
     logger = logging.getLogger(__name__)
     bot = app.bot
@@ -218,7 +217,7 @@ async def scheduler_loop(config, db_conn, http_client, reddit, gemini_model, app
     has_remaining = False
 
     # Run initial fetch
-    remaining = await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+    remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
     has_remaining = remaining > 0
     last_fetch = asyncio.get_event_loop().time()
 
@@ -229,7 +228,7 @@ async def scheduler_loop(config, db_conn, http_client, reddit, gemini_model, app
             # Check for manual fetch trigger
             if app.bot_data.get("fetch_now"):
                 app.bot_data["fetch_now"] = False
-                remaining = await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+                remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
                 has_remaining = remaining > 0
                 last_fetch = current_time
 
@@ -238,7 +237,7 @@ async def scheduler_loop(config, db_conn, http_client, reddit, gemini_model, app
 
             # Scheduled fetch
             if current_time - last_fetch >= next_interval:
-                remaining = await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+                remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
                 has_remaining = remaining > 0
                 last_fetch = current_time
 
@@ -277,13 +276,6 @@ async def main() -> None:
     # Initialize HTTP client
     http_client = create_http_client()
 
-    # Initialize Reddit client
-    reddit = await create_reddit_client(
-        config.reddit_client_id,
-        config.reddit_client_secret,
-    )
-    logger.info("Reddit client initialized")
-
     # Initialize Gemini
     gemini_model = init_gemini(config.gemini_api_key)
     logger.info("Gemini initialized")
@@ -299,7 +291,7 @@ async def main() -> None:
         try:
             # Run scheduler in parallel with bot polling
             scheduler_task = asyncio.create_task(
-                scheduler_loop(config, db_conn, http_client, reddit, gemini_model, app)
+                scheduler_loop(config, db_conn, http_client, gemini_model, app)
             )
 
             # Start polling (this blocks)
@@ -314,7 +306,6 @@ async def main() -> None:
             await app.updater.stop()
             await app.stop()
             await http_client.aclose()
-            await reddit.close()
             db_conn.close()
             logger.info("Shutdown complete")
 
