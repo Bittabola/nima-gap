@@ -7,7 +7,8 @@
       "Bash(git add:*)",
       "Bash(git branch:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nPhase 1: Initialize project structure\n\n- Set up directory structure \\(src/, config/, docker/, data/\\)\n- Add requirements.txt with dependencies\n- Add .env.example with configuration template\n- Add .gitignore for Python project\n- Add config/sources.yaml with RSS and Reddit sources\n- Include project plan document\nEOF\n\\)\")",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nPhase 2: Implement core modules\n\n- config.py: Load environment variables and sources.yaml\n- database.py: SQLite operations for articles table\n- fetcher.py: RSS and Reddit \\(asyncpraw\\) content fetching\n- ai.py: Gemini classification and Uzbek translation\nEOF\n\\)\")"
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nPhase 2: Implement core modules\n\n- config.py: Load environment variables and sources.yaml\n- database.py: SQLite operations for articles table\n- fetcher.py: RSS and Reddit \\(asyncpraw\\) content fetching\n- ai.py: Gemini classification and Uzbek translation\nEOF\n\\)\")",
+      "Bash(git commit:*)"
     ]
   }
 }
