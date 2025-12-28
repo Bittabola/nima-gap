@@ -9,7 +9,7 @@ A Telegram bot that curates feel-good human stories from around the world, trans
 - Automatic translation/retelling in Uzbek using Gemini
 - Admin approval workflow via Telegram
 - Scheduled publishing with rate limiting
-- Docker deployment with auto-deploy via GitHub Actions
+- Docker deployment ready
 
 ## Setup
 
@@ -25,8 +25,8 @@ A Telegram bot that curates feel-good human stories from around the world, trans
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/olamda-nima-gap.git
-cd olamda-nima-gap
+git clone https://github.com/Bittabola/nima-gap.git
+cd nima-gap
 
 # Create virtual environment
 python -m venv venv
@@ -97,14 +97,20 @@ sources:
 - `/status` - Show pending/approved counts
 - `/fetch` - Trigger manual fetch
 
-## Auto-Deployment
+## Deployment
 
-Push to `main` branch triggers automatic deployment via GitHub Actions.
+To deploy on a VPS:
 
-Required GitHub Secrets:
-- `VPS_HOST` - Server IP or hostname
-- `VPS_USERNAME` - SSH username
-- `VPS_SSH_KEY` - Private SSH key
+```bash
+# On your server
+git clone https://github.com/Bittabola/nima-gap.git
+cd nima-gap
+cp .env.example .env
+# Edit .env with your credentials
+
+# Start with Docker
+docker compose -f docker/docker-compose.yml up -d
+```
 
 ## License
 
