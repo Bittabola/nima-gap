@@ -19,6 +19,7 @@ class Config:
 
     # Gemini
     gemini_api_key: str
+    gemini_model: str
 
     # Paths and settings
     database_path: str
@@ -53,6 +54,7 @@ def load_config() -> Config:
         telegram_channel_id=os.environ["TELEGRAM_CHANNEL_ID"],
         telegram_admin_id=int(os.environ["TELEGRAM_ADMIN_ID"]),
         gemini_api_key=os.environ["GEMINI_API_KEY"],
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
         database_path=os.getenv("DATABASE_PATH", "data/olamda.db"),
         fetch_interval_hours=int(os.getenv("FETCH_INTERVAL_HOURS", "3")),
         publish_gap_minutes=int(os.getenv("PUBLISH_GAP_MINUTES", "60")),

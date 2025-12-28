@@ -71,6 +71,7 @@ docker compose -f docker/docker-compose.yml down
 | `TELEGRAM_CHANNEL_ID` | Yes | Channel to publish to (@username or ID) |
 | `TELEGRAM_ADMIN_ID` | Yes | Your Telegram user ID |
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key |
+| `GEMINI_MODEL` | No | Gemini model to use (default: gemini-1.5-flash) |
 | `DATABASE_PATH` | No | SQLite database path (default: data/olamda.db) |
 | `FETCH_INTERVAL_HOURS` | No | Hours between fetches (default: 3) |
 | `PUBLISH_GAP_MINUTES` | No | Minutes between publishes (default: 60) |

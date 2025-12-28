@@ -277,8 +277,8 @@ async def main() -> None:
     http_client = create_http_client()
 
     # Initialize Gemini
-    gemini_model = init_gemini(config.gemini_api_key)
-    logger.info("Gemini initialized")
+    gemini_model = init_gemini(config.gemini_api_key, config.gemini_model)
+    logger.info(f"Gemini initialized with model: {config.gemini_model}")
 
     # Create Telegram bot
     app = create_bot(config.telegram_bot_token, config.telegram_admin_id, db_conn)
