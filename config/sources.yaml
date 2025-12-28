@@ -1,0 +1,42 @@
+sources:
+  # RSS feeds
+  - name: "Humans of Bombay"
+    url: "https://humansofbombay.in/feed"
+    type: rss
+
+  - name: "Stories of Nepal"
+    url: "https://www.storiesofnepal.com/feed"
+    type: rss
+
+  - name: "The Doe"
+    url: "https://www.thedoe.com/feed"
+    type: rss
+
+  - name: "Voices on Central Asia"
+    url: "https://voicesoncentralasia.org/feed"
+    type: rss
+
+  # Reddit (using asyncpraw - just subreddit name)
+  - name: "r/MadeMeSmile"
+    subreddit: "MadeMeSmile"
+    type: reddit
+
+  - name: "r/TrueOffMyChest"
+    subreddit: "TrueOffMyChest"
+    type: reddit
+
+  - name: "r/DecidingToBeBetter"
+    subreddit: "DecidingToBeBetter"
+    type: reddit
+
+  - name: "r/CasualConversation"
+    subreddit: "CasualConversation"
+    type: reddit
+
+  - name: "r/UnsentLetters"
+    subreddit: "UnsentLetters"
+    type: reddit
+
+  - name: "r/bestof"
+    subreddit: "bestof"
+    type: reddit
