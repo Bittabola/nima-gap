@@ -21,6 +21,7 @@ class Article:
     original_summary: str
     content_hash: Optional[str]
     image_url: Optional[str]
+    local_image_path: Optional[str]
     uzbek_content: Optional[str]
     status: str
     created_at: str
@@ -29,8 +30,17 @@ class Article:
 
 # Tracking params to strip from URLs for normalization
 TRACKING_PARAMS = {
-    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "ref", "source", "fbclid", "gclid", "mc_cid", "mc_eid",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "ref",
+    "source",
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
 }
 
 
@@ -57,20 +67,21 @@ def normalize_url(url: str) -> str:
         # Filter out tracking params
         query_params = parse_qs(parsed.query, keep_blank_values=True)
         filtered_params = {
-            k: v for k, v in query_params.items()
-            if k.lower() not in TRACKING_PARAMS
+            k: v for k, v in query_params.items() if k.lower() not in TRACKING_PARAMS
         }
         new_query = urlencode(filtered_params, doseq=True) if filtered_params else ""
 
         # Rebuild URL
-        normalized = urlunparse((
-            parsed.scheme.lower(),
-            host,
-            parsed.path.rstrip("/") or "/",
-            parsed.params,
-            new_query,
-            "",  # Remove fragment
-        ))
+        normalized = urlunparse(
+            (
+                parsed.scheme.lower(),
+                host,
+                parsed.path.rstrip("/") or "/",
+                parsed.params,
+                new_query,
+                "",  # Remove fragment
+            )
+        )
 
         return normalized
     except Exception:
@@ -93,11 +104,7 @@ def title_similarity(title1: str, title2: str) -> float:
     Calculate similarity ratio between two titles (0.0 to 1.0).
     Uses SequenceMatcher for fuzzy matching.
     """
-    return SequenceMatcher(
-        None,
-        title1.lower().strip(),
-        title2.lower().strip()
-    ).ratio()
+    return SequenceMatcher(None, title1.lower().strip(), title2.lower().strip()).ratio()
 
 
 def init_database(db_path: str) -> sqlite3.Connection:
@@ -114,6 +121,7 @@ def init_database(db_path: str) -> sqlite3.Connection:
             original_summary TEXT NOT NULL,
             content_hash TEXT,
             image_url TEXT,
+            local_image_path TEXT,
             uzbek_content TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
@@ -155,6 +163,12 @@ def init_database(db_path: str) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE articles ADD COLUMN content_hash TEXT")
 
+    # Migration: add local_image_path column if missing
+    try:
+        conn.execute("SELECT local_image_path FROM articles LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE articles ADD COLUMN local_image_path TEXT")
+
     conn.commit()
     return conn
 
@@ -164,7 +178,7 @@ def article_exists(conn: sqlite3.Connection, url: str) -> bool:
     normalized = normalize_url(url)
     cursor = conn.execute(
         "SELECT 1 FROM articles WHERE original_url = ? OR original_url = ?",
-        (url, normalized)
+        (url, normalized),
     )
     return cursor.fetchone() is not None
 
@@ -195,9 +209,7 @@ def content_hash_exists(conn: sqlite3.Connection, content_hash: str) -> bool:
 
 
 def find_similar_title(
-    conn: sqlite3.Connection,
-    title: str,
-    threshold: float = 0.85
+    conn: sqlite3.Connection, title: str, threshold: float = 0.85
 ) -> Optional[Article]:
     """
     Find an article with a similar title (above threshold).
@@ -228,7 +240,14 @@ def mark_url_seen(
             INSERT INTO seen_urls (normalized_url, original_url, content_hash, status, reason, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (normalized, url, content_hash, status, reason, datetime.utcnow().isoformat()),
+            (
+                normalized,
+                url,
+                content_hash,
+                status,
+                reason,
+                datetime.utcnow().isoformat(),
+            ),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -251,6 +270,7 @@ def create_article(
     original_summary: str,
     content_hash: Optional[str],
     image_url: Optional[str],
+    local_image_path: Optional[str],
     uzbek_content: str,
 ) -> int:
     """Create article with status 'pending'. Returns article ID."""
@@ -258,8 +278,8 @@ def create_article(
         """
         INSERT INTO articles
         (source_name, original_url, original_title, original_summary,
-         content_hash, image_url, uzbek_content, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+         content_hash, image_url, local_image_path, uzbek_content, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """,
         (
             source_name,
@@ -268,6 +288,7 @@ def create_article(
             original_summary,
             content_hash,
             image_url,
+            local_image_path,
             uzbek_content,
             datetime.utcnow().isoformat(),
         ),
@@ -336,6 +357,14 @@ def get_pending_count(conn: sqlite3.Connection) -> int:
     """Count pending articles."""
     cursor = conn.execute("SELECT COUNT(*) FROM articles WHERE status = 'pending'")
     return cursor.fetchone()[0]
+
+
+def get_pending_articles(conn: sqlite3.Connection) -> list[Article]:
+    """Get all pending articles ordered by creation date."""
+    cursor = conn.execute(
+        "SELECT * FROM articles WHERE status = 'pending' ORDER BY created_at ASC"
+    )
+    return [Article(**dict(row)) for row in cursor.fetchall()]
 
 
 def get_approved_count(conn: sqlite3.Connection) -> int:

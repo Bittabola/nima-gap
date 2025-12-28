@@ -11,6 +11,44 @@ import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
+# Token usage tracking (reset each fetch cycle)
+_token_stats = {
+    "classify_calls": 0,
+    "translate_calls": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+}
+
+
+def reset_token_stats() -> None:
+    """Reset token statistics for a new fetch cycle."""
+    _token_stats["classify_calls"] = 0
+    _token_stats["translate_calls"] = 0
+    _token_stats["input_tokens"] = 0
+    _token_stats["output_tokens"] = 0
+
+
+def get_token_stats() -> dict:
+    """Get current token usage statistics."""
+    return _token_stats.copy()
+
+
+def _log_token_usage(response, call_type: str) -> None:
+    """Extract and log token usage from Gemini response."""
+    try:
+        usage = response.usage_metadata
+        if usage:
+            input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+            output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+            _token_stats["input_tokens"] += input_tokens
+            _token_stats["output_tokens"] += output_tokens
+            logger.debug(
+                f"{call_type}: {input_tokens} input + {output_tokens} output tokens"
+            )
+    except Exception:
+        pass  # Don't fail if usage metadata unavailable
+
+
 # Exponential backoff settings
 MAX_RETRIES = 5
 BASE_DELAY = 1.0  # seconds
@@ -37,14 +75,29 @@ async def call_with_backoff(
             error_str = str(e).lower()
 
             # Check if it's a rate limit or retryable error
-            is_rate_limit = any(x in error_str for x in [
-                "rate limit", "quota", "429", "resource exhausted",
-                "too many requests", "overloaded"
-            ])
-            is_transient = any(x in error_str for x in [
-                "timeout", "connection", "503", "502", "500",
-                "unavailable", "internal error"
-            ])
+            is_rate_limit = any(
+                x in error_str
+                for x in [
+                    "rate limit",
+                    "quota",
+                    "429",
+                    "resource exhausted",
+                    "too many requests",
+                    "overloaded",
+                ]
+            )
+            is_transient = any(
+                x in error_str
+                for x in [
+                    "timeout",
+                    "connection",
+                    "503",
+                    "502",
+                    "500",
+                    "unavailable",
+                    "internal error",
+                ]
+            )
 
             if not (is_rate_limit or is_transient) and attempt > 0:
                 # Non-retryable error after first attempt
@@ -52,7 +105,7 @@ async def call_with_backoff(
                 raise
 
             # Calculate delay with jitter
-            delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+            delay = min(BASE_DELAY * (2**attempt), MAX_DELAY)
             jitter = random.uniform(0, delay * 0.1)
             total_delay = delay + jitter
 
@@ -166,6 +219,9 @@ async def classify_article(
             prompt,
         )
 
+        _token_stats["classify_calls"] += 1
+        _log_token_usage(response, "Classification")
+
         # Parse JSON response
         text = response.text.strip()
         # Handle potential markdown code blocks
@@ -212,6 +268,9 @@ async def translate_article(
             model.generate_content_async,
             prompt,
         )
+
+        _token_stats["translate_calls"] += 1
+        _log_token_usage(response, "Translation")
 
         return TranslationResult(
             content=response.text.strip(),

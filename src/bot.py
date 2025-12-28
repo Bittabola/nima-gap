@@ -1,7 +1,8 @@
 """Telegram bot handlers and publishing."""
 
+import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -15,6 +16,7 @@ from .database import (
     Article,
     get_approved_count,
     get_article_by_id,
+    get_pending_articles,
     get_pending_count,
     update_article_status,
 )
@@ -36,7 +38,7 @@ def truncate(text: str, max_length: int) -> str:
 
 
 async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> None:
-    """Send article to admin for approval."""
+    """Send article to admin for approval with image preview."""
     # Format message
     original_summary = truncate(article.original_summary, 500)
     uzbek_preview = truncate(article.uzbek_content or "", 1500)
@@ -70,6 +72,36 @@ async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> No
     )
 
     try:
+        # Try to send with image if available
+        image_path = article.local_image_path or article.image_url
+        if image_path:
+            try:
+                # Use local file if available, otherwise use URL
+                if article.local_image_path:
+                    with open(article.local_image_path, "rb") as photo_file:
+                        await bot.send_photo(
+                            chat_id=admin_id,
+                            photo=photo_file,
+                            caption=truncate(message, MAX_CAPTION_LENGTH),
+                            parse_mode="HTML",
+                            reply_markup=keyboard,
+                        )
+                else:
+                    await bot.send_photo(
+                        chat_id=admin_id,
+                        photo=article.image_url,
+                        caption=truncate(message, MAX_CAPTION_LENGTH),
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"Failed to send image preview for article {article.id}: {e}"
+                )
+                # Fall through to text-only
+
+        # Text-only fallback (no image or image failed)
         await bot.send_message(
             chat_id=admin_id,
             text=truncate(message, MAX_MESSAGE_LENGTH),
@@ -81,26 +113,46 @@ async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> No
         logger.error(f"Failed to send approval request for article {article.id}: {e}")
 
 
-async def publish_article(bot: Bot, channel_id: str, article: Article) -> bool:
+async def publish_article(
+    bot: Bot, channel_id: str, article: Article, admin_id: Optional[int] = None
+) -> bool:
     """
     Publish article to channel.
-    Tries with image first, falls back to text-only.
+    Tries with cached image first, then original URL, falls back to text-only.
+    Notifies admin if image sending fails.
     Returns True on success.
     """
     content = truncate(article.uzbek_content or "", MAX_MESSAGE_LENGTH)
+    image_failed = False
+    image_error = None
 
     # Try with image if available
-    if article.image_url:
+    image_path = article.local_image_path or article.image_url
+    if image_path:
         try:
-            await bot.send_photo(
-                chat_id=channel_id,
-                photo=article.image_url,
-                caption=truncate(content, MAX_CAPTION_LENGTH),
-                parse_mode="HTML",
-            )
-            return True
+            # Prefer local cached image
+            if article.local_image_path:
+                with open(article.local_image_path, "rb") as photo_file:
+                    await bot.send_photo(
+                        chat_id=channel_id,
+                        photo=photo_file,
+                        caption=truncate(content, MAX_CAPTION_LENGTH),
+                        parse_mode="HTML",
+                    )
+                return True
+            else:
+                # Fall back to URL
+                await bot.send_photo(
+                    chat_id=channel_id,
+                    photo=article.image_url,
+                    caption=truncate(content, MAX_CAPTION_LENGTH),
+                    parse_mode="HTML",
+                )
+                return True
         except Exception as e:
-            logger.warning(f"Image send failed, falling back to text: {e}")
+            image_failed = True
+            image_error = str(e)
+            logger.warning(f"Image send failed for article {article.id}: {e}")
 
     # Text-only (fallback or no image)
     try:
@@ -110,6 +162,18 @@ async def publish_article(bot: Bot, channel_id: str, article: Article) -> bool:
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
+
+        # Notify admin if image failed
+        if image_failed and admin_id:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=f"⚠️ <b>Rasm yuborilmadi</b>\n\n"
+                f"📰 {truncate(article.original_title, 100)}\n"
+                f"❌ {truncate(image_error or 'Unknown error', 200)}\n\n"
+                f"Hikoya rasmsiz nashr qilindi.",
+                parse_mode="HTML",
+            )
+
         return True
     except Exception as e:
         logger.error(f"Failed to publish article {article.id}: {e}")
@@ -178,7 +242,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "👋 Salom! Men Olamda nima gap? botiman.\n\n"
         "Buyruqlar:\n"
         "/status - Statistika\n"
-        "/fetch - Yangi hikoyalarni qidirish"
+        "/fetch - Yangi hikoyalarni qidirish\n"
+        "/resend - Kutilayotgan hikoyalarni qayta yuborish"
     )
 
 
@@ -193,9 +258,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     approved = get_approved_count(conn)
 
     await update.message.reply_text(
-        f"📊 <b>Status</b>\n\n"
-        f"⏳ Kutilmoqda: {pending}\n"
-        f"✅ Tasdiqlangan: {approved}",
+        f"📊 <b>Status</b>\n\n⏳ Kutilmoqda: {pending}\n✅ Tasdiqlangan: {approved}",
         parse_mode="HTML",
     )
 
@@ -212,9 +275,37 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     context.bot_data["fetch_now"] = True
 
 
-async def approval_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /resend command - resend all pending articles for approval."""
+    admin_id = context.bot_data.get("admin_id")
+    if update.effective_user.id != admin_id:
+        return
+
+    conn = context.bot_data.get("db_conn")
+    pending = get_pending_articles(conn)
+
+    if not pending:
+        await update.message.reply_text("📭 Kutilayotgan hikoyalar yo'q")
+        return
+
+    await update.message.reply_text(
+        f"📤 {len(pending)} ta hikoya qayta yuborilmoqda..."
+    )
+
+    sent = 0
+    for article in pending:
+        try:
+            await send_approval_request(context.bot, admin_id, article)
+            sent += 1
+            # Small delay to avoid rate limits
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Failed to resend article {article.id}: {e}")
+
+    await update.message.reply_text(f"✅ {sent}/{len(pending)} ta hikoya yuborildi")
+
+
+async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle approval/rejection button callbacks."""
     query = update.callback_query
     admin_id = context.bot_data.get("admin_id")
@@ -257,12 +348,15 @@ async def approval_callback(
         )
 
 
-def create_bot(token: str, admin_id: int, db_conn: "sqlite3.Connection") -> Application:
+def create_bot(
+    token: str, admin_id: int, channel_id: str, db_conn: "sqlite3.Connection"
+) -> Application:
     """Create and configure Telegram bot application."""
     app = Application.builder().token(token).build()
 
     # Store shared data
     app.bot_data["admin_id"] = admin_id
+    app.bot_data["channel_id"] = channel_id
     app.bot_data["db_conn"] = db_conn
     app.bot_data["fetch_now"] = False
 
@@ -270,6 +364,7 @@ def create_bot(token: str, admin_id: int, db_conn: "sqlite3.Connection") -> Appl
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("fetch", fetch_command))
+    app.add_handler(CommandHandler("resend", resend_command))
     app.add_handler(CallbackQueryHandler(approval_callback))
 
     return app

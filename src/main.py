@@ -4,7 +4,13 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from .ai import classify_article, init_gemini, translate_article
+from .ai import (
+    classify_article,
+    get_token_stats,
+    init_gemini,
+    reset_token_stats,
+    translate_article,
+)
 from .bot import (
     create_bot,
     notify_admin_error,
@@ -29,6 +35,7 @@ from .database import (
     url_seen,
 )
 from .fetcher import create_http_client, fetch_source
+from .media import download_image
 
 
 async def fetch_job(
@@ -44,6 +51,9 @@ async def fetch_job(
     """
     logger = logging.getLogger(__name__)
     logger.info("Starting fetch job...")
+
+    # Reset token stats for this cycle
+    reset_token_stats()
 
     errors = []
     new_articles = 0
@@ -76,7 +86,9 @@ async def fetch_job(
         # Check if we've hit the limit
         if new_articles >= max_to_process:
             remaining = len(all_articles) - processed
-            logger.info(f"Hit limit of {max_to_process}. {remaining} articles remaining.")
+            logger.info(
+                f"Hit limit of {max_to_process}. {remaining} articles remaining."
+            )
             break
 
         processed += 1
@@ -93,15 +105,29 @@ async def fetch_job(
             # Check content hash for similar content from different sources
             if content_hash_exists(db_conn, content_hash):
                 logger.debug(f"Duplicate content hash: {article.title[:50]}")
-                mark_url_seen(db_conn, article.url, content_hash, "duplicate", "content hash match")
+                mark_url_seen(
+                    db_conn,
+                    article.url,
+                    content_hash,
+                    "duplicate",
+                    "content hash match",
+                )
                 skipped_duplicates += 1
                 continue
 
             # Check for similar titles
             similar = find_similar_title(db_conn, article.title)
             if similar:
-                logger.debug(f"Similar title found: {article.title[:50]} ~ {similar.original_title[:50]}")
-                mark_url_seen(db_conn, article.url, content_hash, "duplicate", f"similar to article {similar.id}")
+                logger.debug(
+                    f"Similar title found: {article.title[:50]} ~ {similar.original_title[:50]}"
+                )
+                mark_url_seen(
+                    db_conn,
+                    article.url,
+                    content_hash,
+                    "duplicate",
+                    f"similar to article {similar.id}",
+                )
                 skipped_duplicates += 1
                 continue
 
@@ -112,7 +138,13 @@ async def fetch_job(
 
             if not classification.is_relevant:
                 logger.debug(f"Skipped: {article.title[:50]} - {classification.reason}")
-                mark_url_seen(db_conn, article.url, content_hash, "irrelevant", classification.reason)
+                mark_url_seen(
+                    db_conn,
+                    article.url,
+                    content_hash,
+                    "irrelevant",
+                    classification.reason,
+                )
                 skipped_irrelevant += 1
                 continue
 
@@ -122,10 +154,30 @@ async def fetch_job(
             )
 
             if not translation.success:
-                logger.warning(f"Translation failed for {article.url}: {translation.error}")
-                mark_url_seen(db_conn, article.url, content_hash, "failed", translation.error)
+                logger.warning(
+                    f"Translation failed for {article.url}: {translation.error}"
+                )
+                mark_url_seen(
+                    db_conn, article.url, content_hash, "failed", translation.error
+                )
                 failed += 1
                 continue
+
+            # Download and cache image if available
+            local_image_path = None
+            if article.image_url:
+                image_result = await download_image(
+                    http_client,
+                    article.image_url,
+                    data_dir=config.data_dir,
+                )
+                if image_result.success:
+                    local_image_path = image_result.local_path
+                    logger.debug(
+                        f"Cached image: {article.image_url} -> {local_image_path}"
+                    )
+                else:
+                    logger.warning(f"Image download failed: {image_result.error}")
 
             # Save to database
             article_id = create_article(
@@ -136,6 +188,7 @@ async def fetch_job(
                 original_summary=article.content[:2000],
                 content_hash=content_hash,
                 image_url=article.image_url,
+                local_image_path=local_image_path,
                 uzbek_content=translation.content,
             )
 
@@ -156,10 +209,17 @@ async def fetch_job(
     # Calculate remaining (articles not yet processed)
     remaining = max(0, len(all_articles) - processed)
 
+    # Log token usage
+    stats = get_token_stats()
     logger.info(
         f"Fetch job complete. New: {new_articles}, "
         f"Duplicates: {skipped_duplicates}, Irrelevant: {skipped_irrelevant}, "
         f"Failed: {failed}, Remaining: {remaining}"
+    )
+    logger.info(
+        f"Gemini API usage: {stats['classify_calls']} classifications, "
+        f"{stats['translate_calls']} translations, "
+        f"{stats['input_tokens']} input tokens, {stats['output_tokens']} output tokens"
     )
 
     # Send summary to admin
@@ -195,8 +255,10 @@ async def publish_job(config, db_conn, bot) -> None:
     if not article:
         return  # Nothing to publish
 
-    # Publish
-    success = await publish_article(bot, config.telegram_channel_id, article)
+    # Publish (pass admin_id for failure notifications)
+    success = await publish_article(
+        bot, config.telegram_channel_id, article, admin_id=config.telegram_admin_id
+    )
 
     if success:
         mark_published(db_conn, article.id)
@@ -228,7 +290,9 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
             # Check for manual fetch trigger
             if app.bot_data.get("fetch_now"):
                 app.bot_data["fetch_now"] = False
-                remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
+                remaining = await fetch_job(
+                    config, db_conn, http_client, gemini_model, bot
+                )
                 has_remaining = remaining > 0
                 last_fetch = current_time
 
@@ -237,7 +301,9 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
 
             # Scheduled fetch
             if current_time - last_fetch >= next_interval:
-                remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
+                remaining = await fetch_job(
+                    config, db_conn, http_client, gemini_model, bot
+                )
                 has_remaining = remaining > 0
                 last_fetch = current_time
 
@@ -281,7 +347,12 @@ async def main() -> None:
     logger.info(f"Gemini initialized with model: {config.gemini_model}")
 
     # Create Telegram bot
-    app = create_bot(config.telegram_bot_token, config.telegram_admin_id, db_conn)
+    app = create_bot(
+        config.telegram_bot_token,
+        config.telegram_admin_id,
+        config.telegram_channel_id,
+        db_conn,
+    )
 
     # Start bot and scheduler
     async with app:
