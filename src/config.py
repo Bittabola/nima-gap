@@ -30,6 +30,9 @@ class Config:
     publish_gap_minutes: int
     log_level: str
 
+    # Processing limits
+    max_new_articles_per_fetch: int
+
     # Sources from YAML
     sources: list[dict]
 
@@ -60,5 +63,6 @@ def load_config() -> Config:
         fetch_interval_hours=int(os.getenv("FETCH_INTERVAL_HOURS", "3")),
         publish_gap_minutes=int(os.getenv("PUBLISH_GAP_MINUTES", "60")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        max_new_articles_per_fetch=int(os.getenv("MAX_NEW_ARTICLES_PER_FETCH", "10")),
         sources=sources_data.get("sources", []),
     )

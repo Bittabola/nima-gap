@@ -1,13 +1,70 @@
 """Gemini AI for classification and translation."""
 
+import asyncio
 import json
 import logging
+import random
 from dataclasses import dataclass
 from typing import Optional
 
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
+
+# Exponential backoff settings
+MAX_RETRIES = 5
+BASE_DELAY = 1.0  # seconds
+MAX_DELAY = 60.0  # seconds
+
+
+async def call_with_backoff(
+    func,
+    *args,
+    max_retries: int = MAX_RETRIES,
+    **kwargs,
+):
+    """
+    Call an async function with exponential backoff on failure.
+    Handles rate limits and transient errors.
+    """
+    last_exception = None
+
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            error_str = str(e).lower()
+
+            # Check if it's a rate limit or retryable error
+            is_rate_limit = any(x in error_str for x in [
+                "rate limit", "quota", "429", "resource exhausted",
+                "too many requests", "overloaded"
+            ])
+            is_transient = any(x in error_str for x in [
+                "timeout", "connection", "503", "502", "500",
+                "unavailable", "internal error"
+            ])
+
+            if not (is_rate_limit or is_transient) and attempt > 0:
+                # Non-retryable error after first attempt
+                logger.error(f"Non-retryable error: {e}")
+                raise
+
+            # Calculate delay with jitter
+            delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+            jitter = random.uniform(0, delay * 0.1)
+            total_delay = delay + jitter
+
+            logger.warning(
+                f"API call failed (attempt {attempt + 1}/{max_retries}): {e}. "
+                f"Retrying in {total_delay:.1f}s..."
+            )
+            await asyncio.sleep(total_delay)
+
+    # All retries exhausted
+    logger.error(f"All {max_retries} retries failed. Last error: {last_exception}")
+    raise last_exception
 
 
 @dataclass
@@ -95,13 +152,19 @@ async def classify_article(
     """
     Classify if article is a feel-good story.
     Returns is_relevant=False on any error.
+    Uses exponential backoff for rate limits.
     """
     try:
         # Truncate content to avoid token limits
         truncated_content = content[:3000] if len(content) > 3000 else content
 
         prompt = CLASSIFIER_PROMPT.format(title=title, content=truncated_content)
-        response = await model.generate_content_async(prompt)
+
+        # Use backoff for API call
+        response = await call_with_backoff(
+            model.generate_content_async,
+            prompt,
+        )
 
         # Parse JSON response
         text = response.text.strip()
@@ -132,6 +195,7 @@ async def translate_article(
     """
     Translate/retell article in Uzbek.
     Returns success=False on any error (never raises).
+    Uses exponential backoff for rate limits.
     """
     try:
         # Truncate content to avoid token limits
@@ -142,7 +206,12 @@ async def translate_article(
             content=truncated_content,
             source_url=source_url,
         )
-        response = await model.generate_content_async(prompt)
+
+        # Use backoff for API call
+        response = await call_with_backoff(
+            model.generate_content_async,
+            prompt,
+        )
 
         return TranslationResult(
             content=response.text.strip(),

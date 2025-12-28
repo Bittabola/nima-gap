@@ -71,6 +71,7 @@ docker compose -f docker/docker-compose.yml down
 | `DATABASE_PATH` | No | SQLite database path (default: data/olamda.db) |
 | `FETCH_INTERVAL_HOURS` | No | Hours between fetches (default: 3) |
 | `PUBLISH_GAP_MINUTES` | No | Minutes between publishes (default: 60) |
+| `MAX_NEW_ARTICLES_PER_FETCH` | No | Max articles to process per fetch cycle (default: 10) |
 | `LOG_LEVEL` | No | Logging level (default: INFO) |
 
 ### Adding Sources

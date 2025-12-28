@@ -2,7 +2,6 @@
 
 import logging
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -34,18 +33,6 @@ def truncate(text: str, max_length: int) -> str:
     if len(text) <= max_length:
         return text
     return text[: max_length - 3] + "..."
-
-
-def extract_domain(url: str) -> str:
-    """Extract domain from URL for cleaner attribution."""
-    try:
-        parsed = urlparse(url)
-        domain = parsed.netloc
-        if domain.startswith("www."):
-            domain = domain[4:]
-        return domain
-    except Exception:
-        return url
 
 
 async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> None:
@@ -139,6 +126,43 @@ async def notify_admin_error(bot: Bot, admin_id: int, error: str) -> None:
         )
     except Exception:
         pass  # Don't fail if notification fails
+
+
+async def send_fetch_summary(
+    bot: Bot,
+    admin_id: int,
+    new_articles: int,
+    skipped_duplicates: int,
+    skipped_irrelevant: int,
+    failed: int,
+    remaining: int,
+) -> None:
+    """Send a summary of the fetch job to admin."""
+    if new_articles == 0 and failed == 0:
+        return  # Nothing interesting to report
+
+    parts = []
+    parts.append("📊 <b>Qidiruv yakunlandi</b>\n")
+
+    if new_articles > 0:
+        parts.append(f"✅ Yangi hikoyalar: {new_articles}")
+    if skipped_duplicates > 0:
+        parts.append(f"🔄 Takroriy: {skipped_duplicates}")
+    if skipped_irrelevant > 0:
+        parts.append(f"⏭ O'tkazib yuborildi: {skipped_irrelevant}")
+    if failed > 0:
+        parts.append(f"❌ Xatolik: {failed}")
+    if remaining > 0:
+        parts.append(f"⏳ Keyingi safar: {remaining}")
+
+    try:
+        await bot.send_message(
+            chat_id=admin_id,
+            text="\n".join(parts),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
 
 # Command handlers

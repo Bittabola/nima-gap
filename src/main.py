@@ -10,16 +10,23 @@ from .bot import (
     notify_admin_error,
     publish_article,
     send_approval_request,
+    send_fetch_summary,
 )
 from .config import load_config
 from .database import (
     article_exists,
+    compute_content_hash,
+    content_hash_exists,
     create_article,
+    find_similar_title,
     get_article_by_id,
     get_last_publish_time,
     get_next_publishable,
     init_database,
     mark_published,
+    mark_url_seen,
+    normalize_url,
+    url_seen,
 )
 from .fetcher import create_http_client, create_reddit_client, fetch_source
 
@@ -31,79 +38,146 @@ async def fetch_job(
     reddit,
     gemini_model,
     bot,
-) -> None:
-    """Fetch and process articles from all sources."""
+) -> int:
+    """
+    Fetch and process articles from all sources.
+    Returns number of unprocessed articles remaining.
+    """
     logger = logging.getLogger(__name__)
     logger.info("Starting fetch job...")
 
     errors = []
     new_articles = 0
+    skipped_duplicates = 0
+    skipped_irrelevant = 0
+    failed = 0
+    remaining = 0
 
+    # Collect all articles first
+    all_articles = []
     for source in config.sources:
         source_name = source.get("name", "Unknown")
-
         try:
-            # Fetch articles
             articles = await fetch_source(source, http_client, reddit)
             logger.info(f"Fetched {len(articles)} from {source_name}")
-
             for article in articles:
-                # Skip if already seen
-                if article_exists(db_conn, article.url):
-                    continue
-
-                # Classify
-                classification = await classify_article(
-                    gemini_model, article.title, article.content
-                )
-
-                if not classification.is_relevant:
-                    logger.debug(
-                        f"Skipped: {article.title[:50]} - {classification.reason}"
-                    )
-                    continue
-
-                # Translate
-                translation = await translate_article(
-                    gemini_model, article.title, article.content, article.url
-                )
-
-                if not translation.success:
-                    logger.warning(
-                        f"Translation failed for {article.url}: {translation.error}"
-                    )
-                    continue
-
-                # Save to database
-                article_id = create_article(
-                    db_conn,
-                    source_name=source_name,
-                    original_url=article.url,
-                    original_title=article.title,
-                    original_summary=article.content[:2000],
-                    image_url=article.image_url,
-                    uzbek_content=translation.content,
-                )
-
-                # Send for approval
-                saved_article = get_article_by_id(db_conn, article_id)
-                await send_approval_request(bot, config.telegram_admin_id, saved_article)
-
-                new_articles += 1
-                logger.info(f"New article: {article.title[:50]}")
-
-                # Rate limit Gemini calls
-                await asyncio.sleep(1)
-
+                all_articles.append((source_name, article))
         except Exception as e:
             error_msg = f"{source_name}: {e}"
             logger.error(error_msg)
             errors.append(error_msg)
 
-    logger.info(f"Fetch job complete. New articles: {new_articles}")
+    logger.info(f"Total fetched: {len(all_articles)} articles")
+
+    # Process articles with limit
+    processed = 0
+    max_to_process = config.max_new_articles_per_fetch
+
+    for source_name, article in all_articles:
+        # Check if we've hit the limit
+        if new_articles >= max_to_process:
+            remaining = len(all_articles) - processed
+            logger.info(f"Hit limit of {max_to_process}. {remaining} articles remaining.")
+            break
+
+        processed += 1
+
+        try:
+            # Check URL deduplication (normalized)
+            if article_exists(db_conn, article.url) or url_seen(db_conn, article.url):
+                skipped_duplicates += 1
+                continue
+
+            # Compute content hash for duplicate detection
+            content_hash = compute_content_hash(article.title, article.content)
+
+            # Check content hash for similar content from different sources
+            if content_hash_exists(db_conn, content_hash):
+                logger.debug(f"Duplicate content hash: {article.title[:50]}")
+                mark_url_seen(db_conn, article.url, content_hash, "duplicate", "content hash match")
+                skipped_duplicates += 1
+                continue
+
+            # Check for similar titles
+            similar = find_similar_title(db_conn, article.title)
+            if similar:
+                logger.debug(f"Similar title found: {article.title[:50]} ~ {similar.original_title[:50]}")
+                mark_url_seen(db_conn, article.url, content_hash, "duplicate", f"similar to article {similar.id}")
+                skipped_duplicates += 1
+                continue
+
+            # Classify
+            classification = await classify_article(
+                gemini_model, article.title, article.content
+            )
+
+            if not classification.is_relevant:
+                logger.debug(f"Skipped: {article.title[:50]} - {classification.reason}")
+                mark_url_seen(db_conn, article.url, content_hash, "irrelevant", classification.reason)
+                skipped_irrelevant += 1
+                continue
+
+            # Translate
+            translation = await translate_article(
+                gemini_model, article.title, article.content, article.url
+            )
+
+            if not translation.success:
+                logger.warning(f"Translation failed for {article.url}: {translation.error}")
+                mark_url_seen(db_conn, article.url, content_hash, "failed", translation.error)
+                failed += 1
+                continue
+
+            # Save to database
+            article_id = create_article(
+                db_conn,
+                source_name=source_name,
+                original_url=article.url,
+                original_title=article.title,
+                original_summary=article.content[:2000],
+                content_hash=content_hash,
+                image_url=article.image_url,
+                uzbek_content=translation.content,
+            )
+
+            # Send for approval
+            saved_article = get_article_by_id(db_conn, article_id)
+            await send_approval_request(bot, config.telegram_admin_id, saved_article)
+
+            new_articles += 1
+            logger.info(f"New article: {article.title[:50]}")
+
+            # Small delay between articles (backoff handles rate limits)
+            await asyncio.sleep(0.5)
+
+        except Exception as e:
+            logger.error(f"Error processing article {article.url}: {e}")
+            failed += 1
+
+    # Calculate remaining (articles not yet processed)
+    remaining = max(0, len(all_articles) - processed)
+
+    logger.info(
+        f"Fetch job complete. New: {new_articles}, "
+        f"Duplicates: {skipped_duplicates}, Irrelevant: {skipped_irrelevant}, "
+        f"Failed: {failed}, Remaining: {remaining}"
+    )
+
+    # Send summary to admin
+    await send_fetch_summary(
+        bot,
+        config.telegram_admin_id,
+        new_articles,
+        skipped_duplicates,
+        skipped_irrelevant,
+        failed,
+        remaining,
+    )
 
     if errors:
         await notify_admin_error(bot, config.telegram_admin_id, "\n".join(errors))
+
+    return remaining
 
 
 async def publish_job(config, db_conn, bot) -> None:
@@ -138,11 +212,14 @@ async def scheduler_loop(config, db_conn, http_client, reddit, gemini_model, app
     bot = app.bot
 
     fetch_interval = config.fetch_interval_hours * 3600  # Convert to seconds
+    remaining_interval = 300  # 5 minutes if there are remaining articles
     last_fetch = 0
     last_heartbeat = 0
+    has_remaining = False
 
     # Run initial fetch
-    await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+    remaining = await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+    has_remaining = remaining > 0
     last_fetch = asyncio.get_event_loop().time()
 
     while True:
@@ -152,12 +229,17 @@ async def scheduler_loop(config, db_conn, http_client, reddit, gemini_model, app
             # Check for manual fetch trigger
             if app.bot_data.get("fetch_now"):
                 app.bot_data["fetch_now"] = False
-                await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+                remaining = await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+                has_remaining = remaining > 0
                 last_fetch = current_time
 
+            # Determine next fetch interval based on remaining articles
+            next_interval = remaining_interval if has_remaining else fetch_interval
+
             # Scheduled fetch
-            elif current_time - last_fetch >= fetch_interval:
-                await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+            if current_time - last_fetch >= next_interval:
+                remaining = await fetch_job(config, db_conn, http_client, reddit, gemini_model, bot)
+                has_remaining = remaining > 0
                 last_fetch = current_time
 
             # Check publishing every minute
