@@ -322,24 +322,25 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     article = get_article_by_id(conn, article_id)
 
     if not article:
-        await query.edit_message_text("❌ Hikoya topilmadi")
+        await query.answer("❌ Hikoya topilmadi", show_alert=True)
         return
 
     if action == "approve":
         update_article_status(conn, article_id, "approved")
-        await query.edit_message_text(
-            f"✅ <b>Tasdiqlandi</b>\n\n"
+        # Use edit_message_caption for photo messages, with reply_markup=None to remove buttons
+        await query.edit_message_caption(
+            caption=f"✅ <b>Tasdiqlandi</b>\n\n"
             f"📰 {article.original_title}\n\n"
             f"Nashr qilish navbatiga qo'shildi.",
             parse_mode="HTML",
-            disable_web_page_preview=True,
+            reply_markup=None,
         )
     else:  # reject
         update_article_status(conn, article_id, "rejected")
-        await query.edit_message_text(
-            f"❌ <b>Rad etildi</b>\n\n📰 {article.original_title}",
+        await query.edit_message_caption(
+            caption=f"❌ <b>Rad etildi</b>\n\n📰 {article.original_title}",
             parse_mode="HTML",
-            disable_web_page_preview=True,
+            reply_markup=None,
         )
 
 
