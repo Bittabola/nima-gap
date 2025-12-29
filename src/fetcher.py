@@ -61,25 +61,8 @@ def extract_image_from_html(html_content: str) -> Optional[str]:
     matches = re.findall(img_pattern, html_content, re.IGNORECASE)
 
     for url in matches:
-        # Skip common icon/badge patterns
-        if any(
-            skip in url.lower()
-            for skip in [
-                "icon",
-                "logo",
-                "badge",
-                "avatar",
-                "emoji",
-                "button",
-                "pixel",
-                "tracking",
-                "ads",
-                "banner",
-                "sprite",
-                "1x1",
-                "spacer",
-            ]
-        ):
+        # Skip junk images (icons, share buttons, etc.)
+        if is_junk_image_url(url):
             continue
 
         # Skip data URLs
@@ -93,6 +76,43 @@ def extract_image_from_html(html_content: str) -> Optional[str]:
         return url
 
     return None
+
+
+def is_junk_image_url(url: str) -> bool:
+    """Check if image URL is likely a junk image (icon, share button, etc.)."""
+    if not url:
+        return True
+
+    lower = url.lower()
+
+    # Skip common junk patterns
+    junk_patterns = [
+        "icon",
+        "logo",
+        "badge",
+        "avatar",
+        "emoji",
+        "button",
+        "pixel",
+        "tracking",
+        "ads",
+        "banner",
+        "sprite",
+        "1x1",
+        "spacer",
+        "share",
+        "social",
+        "facebook",
+        "twitter",
+        "linkedin",
+        "pinterest",
+        "feed-",
+        "placeholder",
+        "default",
+        "blank",
+    ]
+
+    return any(pattern in lower for pattern in junk_patterns)
 
 
 def extract_image_from_media_thumbnail(entry) -> Optional[str]:
@@ -122,6 +142,8 @@ def extract_image_from_entry(entry, content: str) -> Optional[str]:
     2. media:thumbnail
     3. enclosures
     4. <img> tags in content
+
+    Filters out junk images (icons, share buttons, etc.) at each step.
     """
     image_url = None
 
@@ -131,13 +153,15 @@ def extract_image_from_entry(entry, content: str) -> Optional[str]:
             media_type = media.get("type", "")
             if media_type.startswith("image/") or not media_type:
                 url = media.get("url")
-                if url:
+                if url and not is_junk_image_url(url):
                     image_url = url
                     break
 
     # 2. media:thumbnail
     if not image_url:
-        image_url = extract_image_from_media_thumbnail(entry)
+        url = extract_image_from_media_thumbnail(entry)
+        if url and not is_junk_image_url(url):
+            image_url = url
 
     # 3. enclosures
     if not image_url and hasattr(entry, "enclosures") and entry.enclosures:
@@ -145,11 +169,11 @@ def extract_image_from_entry(entry, content: str) -> Optional[str]:
             enc_type = enc.get("type", "")
             if enc_type.startswith("image/"):
                 url = enc.get("href") or enc.get("url")
-                if url:
+                if url and not is_junk_image_url(url):
                     image_url = url
                     break
 
-    # 4. Extract from content HTML (last resort)
+    # 4. Extract from content HTML (last resort, already filters junk)
     if not image_url:
         # Try content:encoded first (usually has full HTML)
         html_content = ""
