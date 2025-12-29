@@ -201,10 +201,12 @@ You do not sound like a journalist or a textbook. You sound like a curious frien
 <b>Yong'in daraxt ichida</b>
 
 Bu videodagi holatga ishonish qiyin. Daraxt tashqaridan butun, lekin ichi yonyapti.
+
 Bunga sabab — chaqmoq urishi. Olov daraxtning qurigan o'zagini yoqib yuborgan.
+
 Tabiatning bunday g'aroliklari ham bo'lib turadi.
 
-<a href="https://example.com">Manba</a>
+<a href="https://example.com/tree-fire">Manba</a>
 
 @olamda_nima_gap
 
@@ -213,21 +215,26 @@ Tabiatning bunday g'aroliklari ham bo'lib turadi.
 <b>Yaponiyada velosipedlar turargohi</b>
 
 Velosipedni qayerga qo'yishni bilmayapsizmi? Yaponiyada bu muammo emas.
+
 Siz shunchaki velosipedni maxsus joyga qo'yasiz, avtomat esa uni olib, yer ostidagi xavfsiz omborga joylashtiadi.
+
 Ham joy tejaladi, ham o'g'irlanmaydi.
 
-<a href="https://example.com">Manba</a>
+<a href="https://reddit.com/r/japan/example">Manba</a>
 
 @olamda_nima_gap
 
-**Formatting Rules (Telegram HTML):**
-- Headline: Use <b>text</b> for bold
-- Body: Each sentence on a new line
-- Source: Link as <a href="URL">Manba</a> on its own line
-- Channel tag: @olamda_nima_gap on its own line at the end
+**Formatting Rules (CRITICAL - follow exactly):**
+1. Headline: Wrap in <b>...</b> tags
+2. Blank line after headline
+3. Each sentence/paragraph separated by a BLANK LINE
+4. Blank line before Manba link
+5. Source link: <a href="{source_url}">Manba</a> (use the actual Source URL provided below)
+6. Blank line before @olamda_nima_gap
+7. End with @olamda_nima_gap on its own line
 
 **Task:**
-Generate a post following this exact style and structure based on the input below.
+Generate a post following this exact style and structure. Use the Source URL below in the Manba href.
 
 Source: {source_name}
 Source URL: {source_url}
