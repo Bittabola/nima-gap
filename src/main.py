@@ -34,7 +34,7 @@ from .database import (
     mark_url_seen,
     url_seen,
 )
-from .fetcher import create_http_client, fetch_source
+from .fetcher import FetchedArticle, create_http_client, fetch_source
 from .media import download_image
 
 
@@ -62,21 +62,37 @@ async def fetch_job(
     failed = 0
     remaining = 0
 
-    # Collect all articles first
-    all_articles = []
+    # Collect articles from each source separately
+    articles_by_source: list[list[tuple[str, FetchedArticle]]] = []
     for source in config.sources:
         source_name = source.get("name", "Unknown")
         try:
             articles = await fetch_source(source, http_client)
             logger.info(f"Fetched {len(articles)} from {source_name}")
-            for article in articles:
-                all_articles.append((source_name, article))
+            source_articles = [(source_name, article) for article in articles]
+            if source_articles:
+                articles_by_source.append(source_articles)
         except Exception as e:
             error_msg = f"{source_name}: {e}"
             logger.error(error_msg)
             errors.append(error_msg)
 
-    logger.info(f"Total fetched: {len(all_articles)} articles")
+    # Interleave articles from different sources (round-robin)
+    # This ensures we don't process all articles from one source consecutively
+    all_articles = []
+    while articles_by_source:
+        # Take one article from each source in turn
+        empty_sources = []
+        for i, source_list in enumerate(articles_by_source):
+            if source_list:
+                all_articles.append(source_list.pop(0))
+            if not source_list:
+                empty_sources.append(i)
+        # Remove exhausted sources (in reverse order to preserve indices)
+        for i in reversed(empty_sources):
+            articles_by_source.pop(i)
+
+    logger.info(f"Total fetched: {len(all_articles)} articles (interleaved)")
 
     # Process articles with limit
     processed = 0
@@ -172,13 +188,14 @@ async def fetch_job(
                 skipped_irrelevant += 1
                 continue
 
-            # Translate (with source name for attribution)
+            # Translate (with source name and media type for attribution)
             translation = await translate_article(
                 gemini_model,
                 article.title,
                 article.content,
                 article.url,
                 source_name=source_name,
+                media_type=article.media_type,
             )
 
             if not translation.success:
