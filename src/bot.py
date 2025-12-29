@@ -53,9 +53,7 @@ async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> No
 
 🇺🇿 <b>Telegram uchun:</b>
 
-{uzbek_preview}
-
-🔗 {article.original_url}"""
+{uzbek_preview}"""
 
     # Create approval buttons
     keyboard = InlineKeyboardMarkup(
@@ -331,8 +329,7 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         update_article_status(conn, article_id, "approved")
         await query.edit_message_text(
             f"✅ <b>Tasdiqlandi</b>\n\n"
-            f"📰 {article.original_title}\n"
-            f"🔗 {article.original_url}\n\n"
+            f"📰 {article.original_title}\n\n"
             f"Nashr qilish navbatiga qo'shildi.",
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -340,9 +337,7 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     else:  # reject
         update_article_status(conn, article_id, "rejected")
         await query.edit_message_text(
-            f"❌ <b>Rad etildi</b>\n\n"
-            f"📰 {article.original_title}\n"
-            f"🔗 {article.original_url}",
+            f"❌ <b>Rad etildi</b>\n\n📰 {article.original_title}",
             parse_mode="HTML",
             disable_web_page_preview=True,
         )

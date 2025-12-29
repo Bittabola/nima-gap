@@ -269,8 +269,9 @@ def extract_reddit_media_url(post_data: dict) -> Optional[str]:
             return media_url
         # Reddit video (v.redd.it)
         if "v.redd.it" in lower:
-            # Get the fallback URL from media
-            reddit_video = post_data.get("media", {}).get("reddit_video", {})
+            # Get the fallback URL from media (handle None explicitly)
+            media = post_data.get("media") or {}
+            reddit_video = media.get("reddit_video") or {}
             fallback = reddit_video.get("fallback_url")
             if fallback:
                 return fallback
