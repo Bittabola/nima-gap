@@ -275,12 +275,15 @@ async def download_video(
     url: str,
     data_dir: str = "data",
     max_size: int = TELEGRAM_VIDEO_MAX_SIZE,
+    max_retries: int = 3,
 ) -> VideoResult:
     """
-    Download video using yt-dlp.
+    Download video using yt-dlp with retry logic.
     Handles Reddit videos (merges video + audio) and other sources.
     Returns VideoResult with local path on success.
     """
+    import asyncio
+
     if not url:
         return VideoResult(success=False, error="No URL provided", original_url=url)
 
@@ -308,104 +311,147 @@ async def download_video(
             file_size=file_size,
         )
 
-    # Download with yt-dlp
-    try:
-        # yt-dlp options for optimal Telegram compatibility
-        cmd = [
-            "yt-dlp",
-            "--no-playlist",
-            "--no-warnings",
-            "--quiet",
-            # Format: best video+audio, let yt-dlp choose codecs
-            "-f",
-            "bestvideo+bestaudio/best",
-            # Convert to mp4 for Telegram compatibility
-            "--merge-output-format",
-            "mp4",
-            "--recode-video",
-            "mp4",
-            # Output path
-            "-o",
-            str(local_path),
-            # Timeout
-            "--socket-timeout",
-            "30",
-            # Don't download if too large
-            "--max-filesize",
-            str(max_size),
-            url,
-        ]
+    # Download with yt-dlp (with retries for transient errors)
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            # yt-dlp options for optimal Telegram compatibility
+            cmd = [
+                "yt-dlp",
+                "--no-playlist",
+                "--no-warnings",
+                "--quiet",
+                # Format: best video+audio, let yt-dlp choose codecs
+                "-f",
+                "bestvideo+bestaudio/best",
+                # Convert to mp4 for Telegram compatibility
+                "--merge-output-format",
+                "mp4",
+                "--recode-video",
+                "mp4",
+                # Output path
+                "-o",
+                str(local_path),
+                # Timeout
+                "--socket-timeout",
+                "30",
+                # Don't download if too large
+                "--max-filesize",
+                str(max_size),
+                url,
+            ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,  # 2 minute timeout
-        )
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,  # 2 minute timeout
+            )
 
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() or "yt-dlp failed"
-            # Clean up partial downloads
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or "yt-dlp failed"
+                # Clean up partial downloads
+                if local_path.exists():
+                    local_path.unlink()
+
+                # Check if this is a retryable error (SSL, network issues)
+                retryable = any(
+                    err in error_msg.lower()
+                    for err in ["ssl", "connection", "timeout", "network", "eof"]
+                )
+
+                if retryable and attempt < max_retries - 1:
+                    logger.warning(
+                        f"yt-dlp attempt {attempt + 1}/{max_retries} failed for {url}: {error_msg[:100]}"
+                    )
+                    last_error = error_msg
+                    await asyncio.sleep(2**attempt)  # Exponential backoff: 1, 2, 4 sec
+                    continue
+
+                logger.warning(f"yt-dlp failed for {url}: {error_msg}")
+                return VideoResult(
+                    success=False,
+                    error=f"Download failed: {error_msg[:200]}",
+                    original_url=url,
+                )
+
+            # Verify file exists and check size
+            if not local_path.exists():
+                if attempt < max_retries - 1:
+                    logger.warning("File not found after download, retrying...")
+                    last_error = "Download completed but file not found"
+                    await asyncio.sleep(2**attempt)
+                    continue
+                return VideoResult(
+                    success=False,
+                    error="Download completed but file not found",
+                    original_url=url,
+                )
+
+            file_size = local_path.stat().st_size
+            if file_size > max_size:
+                local_path.unlink()
+                return VideoResult(
+                    success=False,
+                    error=f"Video too large: {file_size / 1024 / 1024:.1f} MB",
+                    original_url=url,
+                )
+
+            if file_size < 1024:  # Less than 1KB is suspicious
+                local_path.unlink()
+                if attempt < max_retries - 1:
+                    last_error = "Downloaded file too small"
+                    await asyncio.sleep(2**attempt)
+                    continue
+                return VideoResult(
+                    success=False,
+                    error="Downloaded file too small (likely error)",
+                    original_url=url,
+                )
+
+            logger.info(
+                f"Downloaded video: {url} -> {local_path} ({file_size / 1024 / 1024:.1f} MB)"
+            )
+            return VideoResult(
+                success=True,
+                local_path=str(local_path),
+                original_url=url,
+                file_size=file_size,
+            )
+
+        except subprocess.TimeoutExpired:
             if local_path.exists():
                 local_path.unlink()
-            logger.warning(f"yt-dlp failed for {url}: {error_msg}")
+            if attempt < max_retries - 1:
+                logger.warning("Download timeout, retrying...")
+                last_error = "Download timeout"
+                await asyncio.sleep(2**attempt)
+                continue
             return VideoResult(
-                success=False,
-                error=f"Download failed: {error_msg[:200]}",
-                original_url=url,
+                success=False, error="Download timeout (>2 min)", original_url=url
+            )
+        except FileNotFoundError:
+            return VideoResult(
+                success=False, error="yt-dlp not installed", original_url=url
+            )
+        except Exception as e:
+            if local_path.exists():
+                local_path.unlink()
+            if attempt < max_retries - 1:
+                logger.warning(f"Download error: {e}, retrying...")
+                last_error = str(e)
+                await asyncio.sleep(2**attempt)
+                continue
+            return VideoResult(
+                success=False, error=f"Unexpected error: {e}", original_url=url
             )
 
-        # Verify file exists and check size
-        if not local_path.exists():
-            return VideoResult(
-                success=False,
-                error="Download completed but file not found",
-                original_url=url,
-            )
-
-        file_size = local_path.stat().st_size
-        if file_size > max_size:
-            local_path.unlink()
-            return VideoResult(
-                success=False,
-                error=f"Video too large: {file_size / 1024 / 1024:.1f} MB",
-                original_url=url,
-            )
-
-        if file_size < 1024:  # Less than 1KB is suspicious
-            local_path.unlink()
-            return VideoResult(
-                success=False,
-                error="Downloaded file too small (likely error)",
-                original_url=url,
-            )
-
-        logger.info(
-            f"Downloaded video: {url} -> {local_path} ({file_size / 1024 / 1024:.1f} MB)"
-        )
-        return VideoResult(
-            success=True,
-            local_path=str(local_path),
-            original_url=url,
-            file_size=file_size,
-        )
-
-    except subprocess.TimeoutExpired:
-        if local_path.exists():
-            local_path.unlink()
-        return VideoResult(
-            success=False, error="Download timeout (>2 min)", original_url=url
-        )
-    except FileNotFoundError:
-        return VideoResult(
-            success=False, error="yt-dlp not installed", original_url=url
-        )
-    except Exception as e:
-        if local_path.exists():
-            local_path.unlink()
-        return VideoResult(
-            success=False, error=f"Unexpected error: {e}", original_url=url
-        )
+    # All retries exhausted
+    return VideoResult(
+        success=False,
+        error=f"Failed after {max_retries} attempts: {last_error}",
+        original_url=url,
+    )
 
 
 def get_cached_video_path(url: str, data_dir: str = "data") -> Optional[str]:
