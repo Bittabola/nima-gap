@@ -275,7 +275,7 @@ async def download_video(
     url: str,
     data_dir: str = "data",
     max_size: int = TELEGRAM_VIDEO_MAX_SIZE,
-    max_retries: int = 3,
+    max_retries: int = 5,
 ) -> VideoResult:
     """
     Download video using yt-dlp with retry logic.
@@ -361,11 +361,13 @@ async def download_video(
                 )
 
                 if retryable and attempt < max_retries - 1:
+                    delay = 2 * (2**attempt)  # Exponential backoff: 2, 4, 8, 16, 32 sec
                     logger.warning(
-                        f"yt-dlp attempt {attempt + 1}/{max_retries} failed for {url}: {error_msg[:100]}"
+                        f"yt-dlp attempt {attempt + 1}/{max_retries} failed for {url}, "
+                        f"retrying in {delay}s: {error_msg[:80]}"
                     )
                     last_error = error_msg
-                    await asyncio.sleep(2**attempt)  # Exponential backoff: 1, 2, 4 sec
+                    await asyncio.sleep(delay)
                     continue
 
                 logger.warning(f"yt-dlp failed for {url}: {error_msg}")
@@ -378,9 +380,12 @@ async def download_video(
             # Verify file exists and check size
             if not local_path.exists():
                 if attempt < max_retries - 1:
-                    logger.warning("File not found after download, retrying...")
+                    delay = 2 * (2**attempt)
+                    logger.warning(
+                        f"File not found after download, retrying in {delay}s..."
+                    )
                     last_error = "Download completed but file not found"
-                    await asyncio.sleep(2**attempt)
+                    await asyncio.sleep(delay)
                     continue
                 return VideoResult(
                     success=False,
@@ -400,8 +405,12 @@ async def download_video(
             if file_size < 1024:  # Less than 1KB is suspicious
                 local_path.unlink()
                 if attempt < max_retries - 1:
+                    delay = 2 * (2**attempt)
+                    logger.warning(
+                        f"Downloaded file too small, retrying in {delay}s..."
+                    )
                     last_error = "Downloaded file too small"
-                    await asyncio.sleep(2**attempt)
+                    await asyncio.sleep(delay)
                     continue
                 return VideoResult(
                     success=False,
@@ -423,9 +432,10 @@ async def download_video(
             if local_path.exists():
                 local_path.unlink()
             if attempt < max_retries - 1:
-                logger.warning("Download timeout, retrying...")
+                delay = 2 * (2**attempt)
+                logger.warning(f"Download timeout, retrying in {delay}s...")
                 last_error = "Download timeout"
-                await asyncio.sleep(2**attempt)
+                await asyncio.sleep(delay)
                 continue
             return VideoResult(
                 success=False, error="Download timeout (>2 min)", original_url=url
@@ -438,9 +448,10 @@ async def download_video(
             if local_path.exists():
                 local_path.unlink()
             if attempt < max_retries - 1:
-                logger.warning(f"Download error: {e}, retrying...")
+                delay = 2 * (2**attempt)
+                logger.warning(f"Download error: {e}, retrying in {delay}s...")
                 last_error = str(e)
-                await asyncio.sleep(2**attempt)
+                await asyncio.sleep(delay)
                 continue
             return VideoResult(
                 success=False, error=f"Unexpected error: {e}", original_url=url
