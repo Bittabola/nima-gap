@@ -336,11 +336,11 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
     logger = logging.getLogger(__name__)
     bot = app.bot
 
-    fetch_interval = config.fetch_interval_hours * 3600  # Convert to seconds
     remaining_interval = 300  # 5 minutes if there are remaining articles
-    last_fetch = 0
+    last_remaining_check = 0
     last_heartbeat = 0
     has_remaining = False
+    was_pending = False  # Track if queue was previously non-empty
 
     # Run initial fetch only if no pending articles
     pending_count = get_pending_count(db_conn)
@@ -348,22 +348,24 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
         logger.info(
             f"Skipping initial fetch: {pending_count} articles pending approval"
         )
+        was_pending = True
     else:
         remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
         has_remaining = remaining > 0
-    last_fetch = asyncio.get_event_loop().time()
+        last_remaining_check = asyncio.get_event_loop().time()
 
     while True:
         try:
             current_time = asyncio.get_event_loop().time()
 
-            # Check pending articles - skip fetching if any await approval
+            # Check pending articles
             pending_count = get_pending_count(db_conn)
+            queue_empty = pending_count == 0
 
             # Check for manual fetch trigger
             if app.bot_data.get("fetch_now"):
                 app.bot_data["fetch_now"] = False
-                if pending_count > 0:
+                if not queue_empty:
                     logger.info(
                         f"Manual fetch skipped: {pending_count} articles pending approval"
                     )
@@ -372,23 +374,31 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
                         config, db_conn, http_client, gemini_model, bot
                     )
                     has_remaining = remaining > 0
-                    last_fetch = current_time
+                    last_remaining_check = current_time
+                    was_pending = False
 
-            # Determine next fetch interval based on remaining articles
-            next_interval = remaining_interval if has_remaining else fetch_interval
+            # Fetch immediately when queue becomes empty
+            if queue_empty and was_pending:
+                logger.info("Queue empty, fetching new articles...")
+                remaining = await fetch_job(
+                    config, db_conn, http_client, gemini_model, bot
+                )
+                has_remaining = remaining > 0
+                last_remaining_check = current_time
+                was_pending = False
 
-            # Scheduled fetch - only if no pending articles
-            if current_time - last_fetch >= next_interval:
-                if pending_count > 0:
-                    logger.debug(
-                        f"Scheduled fetch skipped: {pending_count} articles pending"
-                    )
-                else:
+            # If we have remaining articles from hitting limit, check every 5 min
+            elif queue_empty and has_remaining:
+                if current_time - last_remaining_check >= remaining_interval:
+                    logger.info("Processing remaining articles...")
                     remaining = await fetch_job(
                         config, db_conn, http_client, gemini_model, bot
                     )
                     has_remaining = remaining > 0
-                    last_fetch = current_time
+                    last_remaining_check = current_time
+
+            # Update pending state for next iteration
+            was_pending = not queue_empty
 
             # Check publishing every minute
             await publish_job(config, db_conn, bot)
