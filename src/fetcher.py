@@ -20,14 +20,15 @@ def upscale_image_url(url: str) -> str:
     """
     Transform thumbnail URLs to request larger images where possible.
     Handles CDN-specific resize parameters.
+
+    Note: Atlas Obscura CDN blocks non-whitelisted sizes (403 Forbidden),
+    so we don't attempt to upscale those URLs.
     """
     if not url:
         return url
 
-    # Atlas Obscura: rs:fill:300:200:1 -> rs:fill:1200:800:1
-    if "img.atlasobscura.com" in url and "rs:fill:" in url:
-        # Replace small dimensions with larger ones
-        url = re.sub(r"rs:fill:\d+:\d+:", "rs:fill:1200:800:", url)
+    # Add URL transformations for CDNs that support dynamic resizing here
+    # Atlas Obscura: blocked, don't modify
 
     return url
 
