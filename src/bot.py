@@ -31,10 +31,45 @@ MAX_CAPTION_LENGTH = 1024
 
 
 def truncate(text: str, max_length: int) -> str:
-    """Truncate text to max length."""
+    """
+    Truncate text to max length, preserving HTML tag integrity.
+    Closes any unclosed tags after truncation.
+    """
     if len(text) <= max_length:
         return text
-    return text[: max_length - 3] + "..."
+
+    # Truncate
+    truncated = text[: max_length - 3]
+
+    # Find unclosed tags
+    import re  # noqa: PLC0415 - local import for rarely-used function
+
+    # Find all opening tags (including self-closing detection)
+    open_tags = []
+    for match in re.finditer(r"<([a-zA-Z]+)[^>]*>", truncated):
+        tag = match.group(1).lower()
+        # Skip self-closing or void elements
+        if tag not in ("br", "hr", "img", "input", "meta", "link"):
+            open_tags.append(tag)
+
+    # Remove tags that were closed
+    for match in re.finditer(r"</([a-zA-Z]+)>", truncated):
+        tag = match.group(1).lower()
+        if tag in open_tags:
+            open_tags.remove(tag)
+
+    # Check if we cut in the middle of a tag (unclosed <)
+    last_open = truncated.rfind("<")
+    last_close = truncated.rfind(">")
+    if last_open > last_close:
+        # We're inside a tag, remove the partial tag
+        truncated = truncated[:last_open]
+
+    # Close any remaining open tags (in reverse order)
+    for tag in reversed(open_tags):
+        truncated += f"</{tag}>"
+
+    return truncated + "..."
 
 
 async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> None:
