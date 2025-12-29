@@ -213,16 +213,20 @@ async def fetch_job(
             local_video_path = None
 
             if article.media_type == "video" and article.image_url:
-                # Download video (image_url contains video URL for Reddit)
+                # For Reddit videos, use the post URL (yt-dlp handles it better)
+                # For other sources, use the direct video URL
+                video_url = (
+                    article.url
+                    if article.source_type == "reddit"
+                    else article.image_url
+                )
                 video_result = await download_video(
-                    article.image_url,
+                    video_url,
                     data_dir=config.data_dir,
                 )
                 if video_result.success:
                     local_video_path = video_result.local_path
-                    logger.debug(
-                        f"Cached video: {article.image_url} -> {local_video_path}"
-                    )
+                    logger.debug(f"Cached video: {video_url} -> {local_video_path}")
                 else:
                     logger.warning(f"Video download failed: {video_result.error}")
                     # Fall back to treating as image-less post
