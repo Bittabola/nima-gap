@@ -4,3 +4,4 @@ feedparser==6.0.11
 google-generativeai==0.5.4
 PyYAML==6.0.1
 python-dotenv==1.0.1
+yt-dlp==2024.12.13

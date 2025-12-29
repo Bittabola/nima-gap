@@ -5,7 +5,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: olamda-nima-gap
+    image: olamda_nima_gap
+    container_name: olamda_nima_gap
     restart: unless-stopped
     env_file:
       - ../.env

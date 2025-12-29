@@ -16,6 +16,22 @@ MIN_IMAGE_WIDTH = 200
 MIN_IMAGE_HEIGHT = 200
 
 
+def upscale_image_url(url: str) -> str:
+    """
+    Transform thumbnail URLs to request larger images where possible.
+    Handles CDN-specific resize parameters.
+    """
+    if not url:
+        return url
+
+    # Atlas Obscura: rs:fill:300:200:1 -> rs:fill:1200:800:1
+    if "img.atlasobscura.com" in url and "rs:fill:" in url:
+        # Replace small dimensions with larger ones
+        url = re.sub(r"rs:fill:\d+:\d+:", "rs:fill:1200:800:", url)
+
+    return url
+
+
 def strip_html(text: str) -> str:
     """
     Remove HTML tags and decode entities from text.
@@ -158,6 +174,8 @@ class FetchedArticle:
     title: str
     content: str
     image_url: Optional[str]
+    # Media type: "image" or "video" (helps AI write appropriate text)
+    media_type: str = "image"
     # Reddit-specific fields
     score: int = 0
     is_stickied: bool = False
@@ -197,6 +215,7 @@ async def fetch_rss(http_client: httpx.AsyncClient, url: str) -> list[FetchedArt
 
             # Extract image using enhanced extraction
             image_url = extract_image_from_entry(entry, content)
+            image_url = upscale_image_url(image_url)
 
             articles.append(
                 FetchedArticle(
@@ -249,16 +268,87 @@ def extract_reddit_image(post_data: dict) -> Optional[str]:
     return None
 
 
-def extract_reddit_media_url(post_data: dict) -> Optional[str]:
+def is_video_url(url: str) -> bool:
+    """Check if URL points to a video."""
+    if not url:
+        return False
+    lower = url.lower()
+    return any(ext in lower for ext in [".mp4", ".webm", ".gifv", ".mov", "v.redd.it"])
+
+
+def is_youtube_url(url: str) -> bool:
+    """Check if URL is a YouTube video (should be skipped for v1)."""
+    if not url:
+        return False
+    lower = url.lower()
+    return any(
+        domain in lower
+        for domain in ["youtube.com", "youtu.be", "youtube-nocookie.com"]
+    )
+
+
+def extract_gallery_image(post_data: dict) -> Optional[str]:
     """
-    Extract the best media URL from a Reddit post.
-    Priority: url_overridden_by_dest > preview images > thumbnail.
+    Extract the first full-size image from a Reddit gallery post.
+    Gallery posts have is_gallery=True and images in media_metadata.
     """
-    # 1. Try url_overridden_by_dest (direct link to video/image)
-    media_url = post_data.get("url_overridden_by_dest")
+    media_metadata = post_data.get("media_metadata")
+    if not media_metadata:
+        return None
+
+    # Get gallery order from gallery_data if available
+    gallery_data = post_data.get("gallery_data", {})
+    items = gallery_data.get("items", [])
+
+    if items:
+        # Get first image ID from ordered gallery
+        first_id = items[0].get("media_id")
+        if first_id and first_id in media_metadata:
+            media = media_metadata[first_id]
+            # Get the source (full resolution) image
+            source = media.get("s", {})
+            url = source.get("u") or source.get("gif")
+            if url:
+                return html.unescape(url)
+
+    # Fallback: iterate through media_metadata
+    for media_id, media in media_metadata.items():
+        if media.get("status") != "valid":
+            continue
+        source = media.get("s", {})
+        url = source.get("u") or source.get("gif")
+        if url:
+            return html.unescape(url)
+
+    return None
+
+
+def extract_reddit_media(post_data: dict) -> tuple[Optional[str], str]:
+    """
+    Extract the best media URL and type from a Reddit post.
+    Returns (url, media_type) where media_type is "image" or "video".
+    Returns (None, "image") if no suitable media found.
+    Skips YouTube videos (returns None).
+    """
+    # 1. Check for YouTube links first - skip these
+    url_override = post_data.get("url_overridden_by_dest", "")
+    if is_youtube_url(url_override):
+        return None, "image"  # Skip YouTube posts
+
+    # 2. Handle gallery posts (is_gallery: true)
+    if post_data.get("is_gallery"):
+        gallery_url = extract_gallery_image(post_data)
+        if gallery_url:
+            return gallery_url, "image"
+        # Gallery but couldn't extract - skip
+        return None, "image"
+
+    # 3. Try url_overridden_by_dest (direct link to video/image)
+    media_url = url_override
     if media_url:
-        # Check if it's a valid media URL
         lower = media_url.lower()
+
+        # Direct media files
         if any(
             ext in lower
             for ext in [".jpg", ".jpeg", ".png", ".gif", ".mp4", ".webm", ".gifv"]
@@ -266,36 +356,49 @@ def extract_reddit_media_url(post_data: dict) -> Optional[str]:
             # Convert gifv to mp4 for Imgur
             if media_url.endswith(".gifv"):
                 media_url = media_url[:-5] + ".mp4"
-            return media_url
+            media_type = "video" if is_video_url(media_url) else "image"
+            return media_url, media_type
+
         # Reddit video (v.redd.it)
         if "v.redd.it" in lower:
-            # Get the fallback URL from media (handle None explicitly)
             media = post_data.get("media") or {}
             reddit_video = media.get("reddit_video") or {}
             fallback = reddit_video.get("fallback_url")
             if fallback:
-                return fallback
+                return fallback, "video"
+
         # i.redd.it images
         if "i.redd.it" in lower:
-            return media_url
-        # Imgur direct links
-        if "imgur.com" in lower and "/a/" not in lower and "/gallery/" not in lower:
-            # Convert imgur page to direct image
-            if not any(ext in lower for ext in [".jpg", ".png", ".gif", ".mp4"]):
-                return media_url + ".jpg"
-            return media_url
+            return media_url, "image"
 
-    # 2. Try preview images (higher quality)
+        # Imgur direct links (skip albums/galleries)
+        if "imgur.com" in lower and "/a/" not in lower and "/gallery/" not in lower:
+            if not any(ext in lower for ext in [".jpg", ".png", ".gif", ".mp4"]):
+                return media_url + ".jpg", "image"
+            media_type = "video" if is_video_url(media_url) else "image"
+            return media_url, media_type
+
+    # 4. Try preview images (higher quality)
     preview = post_data.get("preview", {})
     images = preview.get("images", [])
     if images:
         source = images[0].get("source", {})
         url = source.get("url")
         if url:
-            return html.unescape(url)
+            return html.unescape(url), "image"
 
-    # 3. Fallback to extract_reddit_image (thumbnail)
-    return extract_reddit_image(post_data)
+    # 5. Fallback to thumbnail
+    thumbnail = extract_reddit_image(post_data)
+    return thumbnail, "image"
+
+
+def extract_reddit_media_url(post_data: dict) -> Optional[str]:
+    """
+    Extract the best media URL from a Reddit post.
+    Legacy wrapper for compatibility.
+    """
+    url, _ = extract_reddit_media(post_data)
+    return url
 
 
 async def fetch_reddit(
@@ -335,8 +438,8 @@ async def fetch_reddit(
             if selftext in ("[removed]", "[deleted]"):
                 continue
 
-            # Extract media URL (this is the key change - prioritize media)
-            media_url = extract_reddit_media_url(post_data)
+            # Extract media URL and type (handles galleries, skips YouTube)
+            media_url, media_type = extract_reddit_media(post_data)
 
             # Build content from title + selftext if available
             content = post_data.get("title", "")
@@ -350,6 +453,7 @@ async def fetch_reddit(
                     title=post_data.get("title", ""),
                     content=content,
                     image_url=media_url,
+                    media_type=media_type,
                     score=score,
                     is_stickied=post_data.get("stickied", False),
                     source_type="reddit",

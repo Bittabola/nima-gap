@@ -22,6 +22,8 @@ class Article:
     content_hash: Optional[str]
     image_url: Optional[str]
     local_image_path: Optional[str]
+    local_video_path: Optional[str]
+    media_type: str  # "image" or "video"
     uzbek_content: Optional[str]
     status: str
     created_at: str
@@ -122,6 +124,8 @@ def init_database(db_path: str) -> sqlite3.Connection:
             content_hash TEXT,
             image_url TEXT,
             local_image_path TEXT,
+            local_video_path TEXT,
+            media_type TEXT NOT NULL DEFAULT 'image',
             uzbek_content TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
@@ -168,6 +172,20 @@ def init_database(db_path: str) -> sqlite3.Connection:
         conn.execute("SELECT local_image_path FROM articles LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE articles ADD COLUMN local_image_path TEXT")
+
+    # Migration: add local_video_path column if missing
+    try:
+        conn.execute("SELECT local_video_path FROM articles LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE articles ADD COLUMN local_video_path TEXT")
+
+    # Migration: add media_type column if missing
+    try:
+        conn.execute("SELECT media_type FROM articles LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE articles ADD COLUMN media_type TEXT NOT NULL DEFAULT 'image'"
+        )
 
     conn.commit()
     return conn
@@ -271,6 +289,8 @@ def create_article(
     content_hash: Optional[str],
     image_url: Optional[str],
     local_image_path: Optional[str],
+    local_video_path: Optional[str],
+    media_type: str,
     uzbek_content: str,
 ) -> int:
     """Create article with status 'pending'. Returns article ID."""
@@ -278,8 +298,9 @@ def create_article(
         """
         INSERT INTO articles
         (source_name, original_url, original_title, original_summary,
-         content_hash, image_url, local_image_path, uzbek_content, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+         content_hash, image_url, local_image_path, local_video_path,
+         media_type, uzbek_content, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """,
         (
             source_name,
@@ -289,6 +310,8 @@ def create_article(
             content_hash,
             image_url,
             local_image_path,
+            local_video_path,
+            media_type,
             uzbek_content,
             datetime.utcnow().isoformat(),
         ),

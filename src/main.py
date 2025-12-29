@@ -35,7 +35,7 @@ from .database import (
     url_seen,
 )
 from .fetcher import FetchedArticle, create_http_client, fetch_source
-from .media import download_image
+from .media import download_image, download_video
 
 
 async def fetch_job(
@@ -208,9 +208,26 @@ async def fetch_job(
                 failed += 1
                 continue
 
-            # Download and cache image if available
+            # Download and cache media
             local_image_path = None
-            if article.image_url:
+            local_video_path = None
+
+            if article.media_type == "video" and article.image_url:
+                # Download video (image_url contains video URL for Reddit)
+                video_result = await download_video(
+                    article.image_url,
+                    data_dir=config.data_dir,
+                )
+                if video_result.success:
+                    local_video_path = video_result.local_path
+                    logger.debug(
+                        f"Cached video: {article.image_url} -> {local_video_path}"
+                    )
+                else:
+                    logger.warning(f"Video download failed: {video_result.error}")
+                    # Fall back to treating as image-less post
+            elif article.image_url:
+                # Download image
                 image_result = await download_image(
                     http_client,
                     article.image_url,
@@ -234,6 +251,8 @@ async def fetch_job(
                 content_hash=content_hash,
                 image_url=article.image_url,
                 local_image_path=local_image_path,
+                local_video_path=local_video_path,
+                media_type=article.media_type,
                 uzbek_content=translation.content,
             )
 

@@ -233,11 +233,18 @@ Ham joy tejaladi, ham o'g'irlanmaydi.
 6. Blank line before @olamda_nima_gap
 7. End with @olamda_nima_gap on its own line
 
+**IMPORTANT - Media Type:**
+The attached media is a **{media_type}**. You MUST match your language to this:
+- If media_type is "image": Use "Suratdagi..." (In the picture...), "Bu rasm...", etc.
+- If media_type is "video": Use "Videoda..." (In the video...), "Bu videoda...", etc.
+NEVER say "video" when describing an image, or vice versa!
+
 **Task:**
 Generate a post following this exact style and structure. Use the Source URL below in the Manba href.
 
 Source: {source_name}
 Source URL: {source_url}
+Media Type: {media_type}
 Original Title: {title}
 Original Content: {content}
 
@@ -302,11 +309,15 @@ async def translate_article(
     content: str,
     source_url: str,
     source_name: str = "Unknown",
+    media_type: str = "image",
 ) -> TranslationResult:
     """
     Translate/retell article in Uzbek (visual-first, 60-word max).
     Returns success=False on any error (never raises).
     Uses exponential backoff for rate limits.
+
+    Args:
+        media_type: "image" or "video" - tells AI what kind of media is attached
     """
     try:
         # Truncate content to avoid token limits
@@ -317,6 +328,7 @@ async def translate_article(
             content=truncated_content,
             source_url=source_url,
             source_name=source_name,
+            media_type=media_type,
         )
 
         # Use backoff for API call
