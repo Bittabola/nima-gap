@@ -158,6 +158,10 @@ class FetchedArticle:
     title: str
     content: str
     image_url: Optional[str]
+    # Reddit-specific fields
+    score: int = 0
+    is_stickied: bool = False
+    source_type: str = "rss"
 
 
 def create_http_client() -> httpx.AsyncClient:
@@ -200,6 +204,7 @@ async def fetch_rss(http_client: httpx.AsyncClient, url: str) -> list[FetchedArt
                     title=strip_html(entry.get("title", "")),
                     content=strip_html(content),
                     image_url=image_url,
+                    source_type="rss",
                 )
             )
 
@@ -244,12 +249,64 @@ def extract_reddit_image(post_data: dict) -> Optional[str]:
     return None
 
 
+def extract_reddit_media_url(post_data: dict) -> Optional[str]:
+    """
+    Extract the best media URL from a Reddit post.
+    Priority: url_overridden_by_dest > preview images > thumbnail.
+    """
+    # 1. Try url_overridden_by_dest (direct link to video/image)
+    media_url = post_data.get("url_overridden_by_dest")
+    if media_url:
+        # Check if it's a valid media URL
+        lower = media_url.lower()
+        if any(
+            ext in lower
+            for ext in [".jpg", ".jpeg", ".png", ".gif", ".mp4", ".webm", ".gifv"]
+        ):
+            # Convert gifv to mp4 for Imgur
+            if media_url.endswith(".gifv"):
+                media_url = media_url[:-5] + ".mp4"
+            return media_url
+        # Reddit video (v.redd.it)
+        if "v.redd.it" in lower:
+            # Get the fallback URL from media
+            reddit_video = post_data.get("media", {}).get("reddit_video", {})
+            fallback = reddit_video.get("fallback_url")
+            if fallback:
+                return fallback
+        # i.redd.it images
+        if "i.redd.it" in lower:
+            return media_url
+        # Imgur direct links
+        if "imgur.com" in lower and "/a/" not in lower and "/gallery/" not in lower:
+            # Convert imgur page to direct image
+            if not any(ext in lower for ext in [".jpg", ".png", ".gif", ".mp4"]):
+                return media_url + ".jpg"
+            return media_url
+
+    # 2. Try preview images (higher quality)
+    preview = post_data.get("preview", {})
+    images = preview.get("images", [])
+    if images:
+        source = images[0].get("source", {})
+        url = source.get("url")
+        if url:
+            return html.unescape(url)
+
+    # 3. Fallback to extract_reddit_image (thumbnail)
+    return extract_reddit_image(post_data)
+
+
 async def fetch_reddit(
     http_client: httpx.AsyncClient,
     subreddit_name: str,
-    limit: int = 25,
+    limit: int = 50,
+    min_score: int = 3000,
 ) -> list[FetchedArticle]:
-    """Fetch text posts from a subreddit using Reddit's public .json endpoint."""
+    """
+    Fetch media posts from a subreddit using Reddit's public .json endpoint.
+    Focuses on visual content (images/videos) and filters by score.
+    """
     articles = []
 
     try:
@@ -262,23 +319,39 @@ async def fetch_reddit(
         for post in data.get("data", {}).get("children", []):
             post_data = post.get("data", {})
 
-            # Skip non-text posts (images, videos, links)
-            selftext = post_data.get("selftext", "")
-            if not selftext:
+            # Skip stickied posts
+            if post_data.get("stickied", False):
                 continue
+
+            # Get score
+            score = post_data.get("score", 0)
+
+            # Skip low-score posts (but still include them with score info for AI to decide)
+            # We'll let the AI classifier handle the final decision
+
+            # Skip deleted/removed
+            selftext = post_data.get("selftext", "")
             if selftext in ("[removed]", "[deleted]"):
                 continue
 
-            # Extract image from preview/thumbnail
-            image_url = extract_reddit_image(post_data)
+            # Extract media URL (this is the key change - prioritize media)
+            media_url = extract_reddit_media_url(post_data)
+
+            # Build content from title + selftext if available
+            content = post_data.get("title", "")
+            if selftext and selftext not in ("[removed]", "[deleted]"):
+                content = f"{content}\n\n{selftext}"
 
             permalink = post_data.get("permalink", "")
             articles.append(
                 FetchedArticle(
                     url=f"https://reddit.com{permalink}",
                     title=post_data.get("title", ""),
-                    content=selftext,
-                    image_url=image_url,
+                    content=content,
+                    image_url=media_url,
+                    score=score,
+                    is_stickied=post_data.get("stickied", False),
+                    source_type="reddit",
                 )
             )
 

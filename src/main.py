@@ -28,10 +28,10 @@ from .database import (
     get_article_by_id,
     get_last_publish_time,
     get_next_publishable,
+    get_pending_count,
     init_database,
     mark_published,
     mark_url_seen,
-    normalize_url,
     url_seen,
 )
 from .fetcher import create_http_client, fetch_source
@@ -131,9 +131,33 @@ async def fetch_job(
                 skipped_duplicates += 1
                 continue
 
-            # Classify
+            # Pre-filter: skip posts without media (save API calls)
+            if not article.image_url:
+                logger.debug(f"Skipped (no media): {article.title[:50]}")
+                mark_url_seen(
+                    db_conn, article.url, content_hash, "irrelevant", "no media"
+                )
+                skipped_irrelevant += 1
+                continue
+
+            # Pre-filter: skip low-karma Reddit posts
+            if article.source_type == "reddit" and article.score < 1000:
+                logger.debug(
+                    f"Skipped (low karma {article.score}): {article.title[:50]}"
+                )
+                mark_url_seen(
+                    db_conn, article.url, content_hash, "irrelevant", "low karma"
+                )
+                skipped_irrelevant += 1
+                continue
+
+            # Classify content
             classification = await classify_article(
-                gemini_model, article.title, article.content
+                gemini_model,
+                article.title,
+                article.content,
+                media_url=article.image_url,
+                source_type=article.source_type,
             )
 
             if not classification.is_relevant:
@@ -148,9 +172,13 @@ async def fetch_job(
                 skipped_irrelevant += 1
                 continue
 
-            # Translate
+            # Translate (with source name for attribution)
             translation = await translate_article(
-                gemini_model, article.title, article.content, article.url
+                gemini_model,
+                article.title,
+                article.content,
+                article.url,
+                source_name=source_name,
             )
 
             if not translation.success:
@@ -278,34 +306,53 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
     last_heartbeat = 0
     has_remaining = False
 
-    # Run initial fetch
-    remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
-    has_remaining = remaining > 0
+    # Run initial fetch only if no pending articles
+    pending_count = get_pending_count(db_conn)
+    if pending_count > 0:
+        logger.info(
+            f"Skipping initial fetch: {pending_count} articles pending approval"
+        )
+    else:
+        remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
+        has_remaining = remaining > 0
     last_fetch = asyncio.get_event_loop().time()
 
     while True:
         try:
             current_time = asyncio.get_event_loop().time()
 
+            # Check pending articles - skip fetching if any await approval
+            pending_count = get_pending_count(db_conn)
+
             # Check for manual fetch trigger
             if app.bot_data.get("fetch_now"):
                 app.bot_data["fetch_now"] = False
-                remaining = await fetch_job(
-                    config, db_conn, http_client, gemini_model, bot
-                )
-                has_remaining = remaining > 0
-                last_fetch = current_time
+                if pending_count > 0:
+                    logger.info(
+                        f"Manual fetch skipped: {pending_count} articles pending approval"
+                    )
+                else:
+                    remaining = await fetch_job(
+                        config, db_conn, http_client, gemini_model, bot
+                    )
+                    has_remaining = remaining > 0
+                    last_fetch = current_time
 
             # Determine next fetch interval based on remaining articles
             next_interval = remaining_interval if has_remaining else fetch_interval
 
-            # Scheduled fetch
+            # Scheduled fetch - only if no pending articles
             if current_time - last_fetch >= next_interval:
-                remaining = await fetch_job(
-                    config, db_conn, http_client, gemini_model, bot
-                )
-                has_remaining = remaining > 0
-                last_fetch = current_time
+                if pending_count > 0:
+                    logger.debug(
+                        f"Scheduled fetch skipped: {pending_count} articles pending"
+                    )
+                else:
+                    remaining = await fetch_job(
+                        config, db_conn, http_client, gemini_model, bot
+                    )
+                    has_remaining = remaining > 0
+                    last_fetch = current_time
 
             # Check publishing every minute
             await publish_job(config, db_conn, bot)

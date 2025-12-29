@@ -1,42 +1,122 @@
 sources:
+  # Reddit JSON sources
+  - name: "Reddit: Specialized Tools"
+    subreddit: "specializedtools"
+    type: reddit
+    category: "Tech"
+    description: "JSON. Look for url_overridden_by_dest for video links. Focus on unique machines."
+
+  - name: "Reddit: NatureIsFuckingLit"
+    subreddit: "NatureIsFuckingLit"
+    type: reddit
+    category: "Nature"
+    description: "JSON. High-contrast, high-action nature clips."
+
+  - name: "Reddit: DamnThatsInteresting"
+    subreddit: "Damnthatsinteresting"
+    type: reddit
+    category: "General"
+    description: "JSON. General viral facts. Filter by score > 5000 to ensure quality."
+
+  - name: "Reddit: BeAmazed"
+    subreddit: "BeAmazed"
+    type: reddit
+    category: "Visuals"
+    description: "JSON. Short, punchy visual clips. Perfect for Telegram."
+
   # RSS feeds
-  - name: "Humans of Bombay"
-    url: "https://humansofbombay.in/feed"
+  - name: "Interesting Engineering"
+    url: "https://interestingengineering.com/feed"
     type: rss
+    category: "Engineering"
+    description: "RSS. Covers civil engineering, mechanics, and innovation."
 
-  - name: "Stories of Nepal"
-    url: "https://www.storiesofnepal.com/feed"
+  - name: "Colossal"
+    url: "https://www.thisiscolossal.com/feed/"
     type: rss
+    category: "Art / Visuals"
+    description: "RSS. Visual-heavy art and design. Look for Doomsday or Kinetic tags."
 
-  - name: "The Doe"
-    url: "https://www.thedoe.com/feed"
+  - name: "Atlas Obscura"
+    url: "https://www.atlasobscura.com/feeds/latest"
     type: rss
+    category: "Curiosity"
+    description: "RSS. Hidden history and geography. Great for Did you know? posts."
 
-  - name: "Voices on Central Asia"
-    url: "https://voicesoncentralasia.org/feed"
+  - name: "Futurism"
+    url: "https://futurism.com/feed"
     type: rss
+    category: "Future Tech"
+    description: "RSS. AI, robotics, and space news."
 
-  # Reddit (using asyncpraw - just subreddit name)
-  - name: "r/MadeMeSmile"
-    subreddit: "MadeMeSmile"
-    type: reddit
+  - name: "My Modern Met"
+    url: "https://mymodernmet.com/feed/"
+    type: rss
+    category: "Culture"
+    description: "RSS. Creative human interest stories and photography."
 
-  - name: "r/TrueOffMyChest"
-    subreddit: "TrueOffMyChest"
-    type: reddit
+  - name: "The Verge (Science)"
+    url: "https://www.theverge.com/rss/science/index.xml"
+    type: rss
+    category: "Science"
+    description: "RSS. Reputable science news. Filter for Discovery or Space."
 
-  - name: "r/DecidingToBeBetter"
-    subreddit: "DecidingToBeBetter"
-    type: reddit
+  - name: "DesignBoom"
+    url: "https://www.designboom.com/feed/"
+    type: rss
+    category: "Design"
+    description: "RSS. Architecture and eccentric product design."
 
-  - name: "r/CasualConversation"
-    subreddit: "CasualConversation"
-    type: reddit
+  - name: "PetaPixel"
+    url: "https://petapixel.com/feed/"
+    type: rss
+    category: "Photography"
+    description: "RSS. Often features viral wildlife or space photography stories."
 
-  - name: "r/UnsentLetters"
-    subreddit: "UnsentLetters"
-    type: reddit
+  - name: "ScienceAlert"
+    url: "https://www.sciencealert.com/feed"
+    type: rss
+    category: "Science"
+    description: "RSS. Pop-science, easy to digest facts."
 
-  - name: "r/bestof"
-    subreddit: "bestof"
-    type: reddit
+  - name: "Big Think"
+    url: "https://bigthink.com/feed"
+    type: rss
+    category: "Ideas"
+    description: "RSS. Intellectual brain food and futuristic concepts."
+
+  - name: "Laughing Squid"
+    url: "https://laughingsquid.com/feed/"
+    type: rss
+    category: "Viral"
+    description: "RSS. Curated viral videos and oddities. Safe and verified content."
+
+  - name: "Yanko Design"
+    url: "https://www.yankodesign.com/feed/"
+    type: rss
+    category: "Future Tech"
+    description: "RSS. Concept technology and futuristic gadgets. Very visual."
+
+  - name: "Moss and Fog"
+    url: "https://mossandfog.com/feed/"
+    type: rss
+    category: "Aesthetics"
+    description: "RSS. Curated cool stuff: architecture, nature, and travel."
+
+  - name: "WebUrbanist"
+    url: "https://weburbanist.com/feed/"
+    type: rss
+    category: "Architecture"
+    description: "RSS. Abandoned places, street art, and unique buildings."
+
+  - name: "Twisted Sifter"
+    url: "https://twistedsifter.com/feed/"
+    type: rss
+    category: "Viral"
+    description: "RSS. The Shirk Report and Picture of the Day are goldmines."
+
+  - name: "The Kids Should See This"
+    url: "https://thekidshouldseethis.com/feed"
+    type: rss
+    category: "Education"
+    description: "RSS. Smart, high-quality science and tech videos (not just for kids)."

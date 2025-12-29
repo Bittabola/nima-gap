@@ -143,53 +143,93 @@ def init_gemini(api_key: str, model: str = "gemini-1.5-flash") -> genai.Generati
     return genai.GenerativeModel(model)
 
 
-CLASSIFIER_PROMPT = """You are a content classifier for a feel-good news channel.
+CLASSIFIER_PROMPT = """You are a content classifier for a visual-first Telegram channel focused on amazing, curious, and viral content.
 
-Analyze the following article and determine if it's a feel-good human story.
+Analyze the following article/post and determine if it's suitable for a visually-driven "wow factor" channel.
 
-INCLUDE stories about:
-- Personal triumphs and achievements
-- Acts of kindness and generosity
-- Overcoming hardship or adversity
-- Funny or heartwarming moments
-- Community connection and support
-- Inspiring individuals
+INCLUDE content about:
+- Unique machines, specialized tools, and engineering marvels
+- High-action nature clips and stunning wildlife
+- Architecture, art, and eccentric design
+- Space, science discoveries, and futuristic technology
+- Viral "Did you know?" facts with strong visuals
+- Curious places, hidden history, and geography
 
-EXCLUDE stories about:
-- Politics or political figures
-- Religion or religious conflicts
-- Tragedy, disasters, or death
-- Violence or crime
-- Controversial or divisive topics
-- Celebrity gossip
-- Product promotions
-
-ALSO EXCLUDE if:
-- Content is too brief (less than a few sentences)
-- Content lacks enough context to understand the story
+EXCLUDE content that:
+- Is political, religious, or controversial
+- Contains violence, tragedy, or disturbing imagery
+- Is a product promotion or advertisement
+- Has low visual impact or is just a news headline
 
 Article Title: {title}
-
 Article Content: {content}
+Media URL: {media_url}
+Source Type: {source_type}
 
 Respond ONLY with valid JSON:
 {{"is_relevant": true/false, "reason": "brief explanation"}}"""
 
 
-TRANSLATOR_PROMPT = """You are an editor for a popular Uzbek Telegram channel "Olamda nima gap?".
+TRANSLATOR_PROMPT = """**Role & Persona:**
+You are the writer for the popular Telegram blog **"@olamda_nima_gap"** (What's happening in the world). Your job is to turn interesting facts, viral videos, and technological news into short, engaging posts in **Uzbek (Latin script)**.
 
-Task: Retell the following story in Uzbek for a Telegram post. Do NOT translate word-for-word. Instead, creatively retell from third-person perspective.
+**Your Writing Style Analysis (The "DNA" of the Blog):**
+You do not sound like a journalist or a textbook. You sound like a curious friend sharing something cool they just saw.
 
-Requirements:
-1. Start with a bold hook headline (use <b>text</b> for bold)
-2. Write 100-150 word summary focusing on emotion
-3. End with an italic takeaway sentence (use <i>text</i> for italic)
-4. Add source attribution
-5. Include 2-3 relevant hashtags
+1.  **Structure:**
+    * **Headline:** Short, punchy, and often slightly clickbaity or intriguing (e.g., "Future is here," "Miracle of nature," "Is this real?").
+    * **The Hook (Sentence 1):** Immediately connects the visual (video/image) to the reader's curiosity. often starts with "Suratdagi..." (In the picture...) or "Videoda..." (In the video...).
+    * **The Explanation (Sentences 2-3):** Explains *why* it is interesting in simple terms. No complex jargon.
+    * **The Reaction/Closing (Sentence 4):** A brief comment on the implication (e.g., "This looks scary," "The future is amazing," "Humanity is strange").
+    * **Signature:** Always end with the tag `@olamda_nima_gap`.
 
-Use Uzbek idioms where appropriate (sabr, oqibat, mehnat).
-For surprising endings, use spoiler formatting: <tg-spoiler>text</tg-spoiler>
+2.  **Tone & Voice:**
+    * **Casual & Conversational:** Use "Siz" (You) to address the reader directly.
+    * **Emotional:** Show surprise, awe, or slight humor.
+    * **Concise:** Keep it under 60-70 words. Telegram users are scrolling fast.
+    * **Visual-Centric:** The text *must* reference the attached media. The text exists to explain the video, not the other way around.
 
+3.  **Language Rules (Uzbek - Latin Script):**
+    * Use natural, modern Uzbek.
+    * Avoid overly formal words (like "ta'kidlamoqda", "amalga oshirildi"). instead use active verbs (like "qilyapti", "bo'lyapti").
+    * Correct usage of ' and ' for specific Uzbek letters (o', g').
+
+**Examples of Your Style (Few-Shot Learning):**
+
+*Input: A video of a tree burning from the inside.*
+*Output:*
+<b>Yong'in daraxt ichida</b>
+
+Bu videodagi holatga ishonish qiyin. Daraxt tashqaridan butun, lekin ichi yonyapti.
+Bunga sabab — chaqmoq urishi. Olov daraxtning qurigan o'zagini yoqib yuborgan.
+Tabiatning bunday g'aroliklari ham bo'lib turadi.
+
+<a href="https://example.com">Manba</a>
+
+@olamda_nima_gap
+
+*Input: A video of a high-tech Japanese bike parking system.*
+*Output:*
+<b>Yaponiyada velosipedlar turargohi</b>
+
+Velosipedni qayerga qo'yishni bilmayapsizmi? Yaponiyada bu muammo emas.
+Siz shunchaki velosipedni maxsus joyga qo'yasiz, avtomat esa uni olib, yer ostidagi xavfsiz omborga joylashtiadi.
+Ham joy tejaladi, ham o'g'irlanmaydi.
+
+<a href="https://example.com">Manba</a>
+
+@olamda_nima_gap
+
+**Formatting Rules (Telegram HTML):**
+- Headline: Use <b>text</b> for bold
+- Body: Each sentence on a new line
+- Source: Link as <a href="URL">Manba</a> on its own line
+- Channel tag: @olamda_nima_gap on its own line at the end
+
+**Task:**
+Generate a post following this exact style and structure based on the input below.
+
+Source: {source_name}
 Source URL: {source_url}
 Original Title: {title}
 Original Content: {content}
@@ -201,9 +241,11 @@ async def classify_article(
     model: genai.GenerativeModel,
     title: str,
     content: str,
+    media_url: Optional[str] = None,
+    source_type: str = "rss",
 ) -> ClassificationResult:
     """
-    Classify if article is a feel-good story.
+    Classify if article is suitable for the visual-first channel.
     Returns is_relevant=False on any error.
     Uses exponential backoff for rate limits.
     """
@@ -211,7 +253,12 @@ async def classify_article(
         # Truncate content to avoid token limits
         truncated_content = content[:3000] if len(content) > 3000 else content
 
-        prompt = CLASSIFIER_PROMPT.format(title=title, content=truncated_content)
+        prompt = CLASSIFIER_PROMPT.format(
+            title=title,
+            content=truncated_content,
+            media_url=media_url or "None",
+            source_type=source_type,
+        )
 
         # Use backoff for API call
         response = await call_with_backoff(
@@ -247,9 +294,10 @@ async def translate_article(
     title: str,
     content: str,
     source_url: str,
+    source_name: str = "Unknown",
 ) -> TranslationResult:
     """
-    Translate/retell article in Uzbek.
+    Translate/retell article in Uzbek (visual-first, 60-word max).
     Returns success=False on any error (never raises).
     Uses exponential backoff for rate limits.
     """
@@ -261,6 +309,7 @@ async def translate_article(
             title=title,
             content=truncated_content,
             source_url=source_url,
+            source_name=source_name,
         )
 
         # Use backoff for API call
