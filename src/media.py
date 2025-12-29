@@ -316,11 +316,13 @@ async def download_video(
             "--no-playlist",
             "--no-warnings",
             "--quiet",
-            # Format selection: prefer mp4, limit size
+            # Format: best video+audio, let yt-dlp choose codecs
             "-f",
-            f"bestvideo[ext=mp4][filesize<{max_size}]+bestaudio[ext=m4a]/best[ext=mp4][filesize<{max_size}]/best[filesize<{max_size}]",
-            # Merge to mp4
+            "bestvideo+bestaudio/best",
+            # Convert to mp4 for Telegram compatibility
             "--merge-output-format",
+            "mp4",
+            "--recode-video",
             "mp4",
             # Output path
             "-o",
