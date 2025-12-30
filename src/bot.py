@@ -34,15 +34,17 @@ def truncate(text: str, max_length: int) -> str:
     """
     Truncate text to max length, preserving HTML tag integrity.
     Closes any unclosed tags after truncation.
+    Guarantees result does not exceed max_length.
     """
     if len(text) <= max_length:
         return text
 
-    # Truncate
-    truncated = text[: max_length - 3]
-
-    # Find unclosed tags
     import re  # noqa: PLC0415 - local import for rarely-used function
+
+    # Reserve space for closing tags and ellipsis
+    # Worst case: 3-4 nested tags like </code></pre></b></a> = ~30 chars + "..." = ~33
+    reserve = 40
+    truncated = text[: max_length - reserve]
 
     # Find all opening tags (including self-closing detection)
     open_tags = []
@@ -65,11 +67,16 @@ def truncate(text: str, max_length: int) -> str:
         # We're inside a tag, remove the partial tag
         truncated = truncated[:last_open]
 
-    # Close any remaining open tags (in reverse order)
+    # Build suffix with closing tags
+    suffix = "..."
     for tag in reversed(open_tags):
-        truncated += f"</{tag}>"
+        suffix += f"</{tag}>"
 
-    return truncated + "..."
+    # Final safety check - trim more if still too long
+    while len(truncated) + len(suffix) > max_length and len(truncated) > 0:
+        truncated = truncated[:-1]
+
+    return truncated + suffix
 
 
 async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> None:
@@ -350,7 +357,7 @@ async def fetch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /resend command - resend all pending articles for approval."""
+    """Handle /resend command - resend pending articles for approval (max 10 at a time)."""
     admin_id = context.bot_data.get("admin_id")
     if update.effective_user.id != admin_id:
         return
@@ -362,21 +369,27 @@ async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("📭 Kutilayotgan hikoyalar yo'q")
         return
 
+    # Limit to 10 articles per resend to avoid flooding
+    max_resend = 10
+    to_send = pending[:max_resend]
+    remaining = len(pending) - len(to_send)
+
     await update.message.reply_text(
-        f"📤 {len(pending)} ta hikoya qayta yuborilmoqda..."
+        f"📤 {len(to_send)} ta hikoya yuborilmoqda..."
+        + (f" ({remaining} ta keyinroq)" if remaining > 0 else "")
     )
 
     sent = 0
-    for article in pending:
+    for article in to_send:
         try:
             await send_approval_request(context.bot, admin_id, article)
             sent += 1
-            # Small delay to avoid rate limits
-            await asyncio.sleep(0.5)
+            # Longer delay to avoid flooding
+            await asyncio.sleep(1.0)
         except Exception as e:
             logger.error(f"Failed to resend article {article.id}: {e}")
 
-    await update.message.reply_text(f"✅ {sent}/{len(pending)} ta hikoya yuborildi")
+    await update.message.reply_text(f"✅ {sent}/{len(to_send)} ta hikoya yuborildi")
 
 
 async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -16,23 +16,6 @@ MIN_IMAGE_WIDTH = 200
 MIN_IMAGE_HEIGHT = 200
 
 
-def upscale_image_url(url: str) -> str:
-    """
-    Transform thumbnail URLs to request larger images where possible.
-    Handles CDN-specific resize parameters.
-
-    Note: Atlas Obscura CDN blocks non-whitelisted sizes (403 Forbidden),
-    so we don't attempt to upscale those URLs.
-    """
-    if not url:
-        return url
-
-    # Add URL transformations for CDNs that support dynamic resizing here
-    # Atlas Obscura: blocked, don't modify
-
-    return url
-
-
 def strip_html(text: str) -> str:
     """
     Remove HTML tags and decode entities from text.
@@ -240,7 +223,6 @@ async def fetch_rss(http_client: httpx.AsyncClient, url: str) -> list[FetchedArt
 
             # Extract image using enhanced extraction
             image_url = extract_image_from_entry(entry, content)
-            image_url = upscale_image_url(image_url)
 
             articles.append(
                 FetchedArticle(
@@ -430,11 +412,10 @@ async def fetch_reddit(
     http_client: httpx.AsyncClient,
     subreddit_name: str,
     limit: int = 50,
-    min_score: int = 3000,
 ) -> list[FetchedArticle]:
     """
     Fetch media posts from a subreddit using Reddit's public .json endpoint.
-    Focuses on visual content (images/videos) and filters by score.
+    Focuses on visual content (images/videos).
     """
     articles = []
 

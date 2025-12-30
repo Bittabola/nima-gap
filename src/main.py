@@ -358,11 +358,11 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
     else:
         remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
         has_remaining = remaining > 0
-        last_remaining_check = asyncio.get_event_loop().time()
+        last_remaining_check = asyncio.get_running_loop().time()
 
     while True:
         try:
-            current_time = asyncio.get_event_loop().time()
+            current_time = asyncio.get_running_loop().time()
 
             # Check pending articles
             pending_count = get_pending_count(db_conn)

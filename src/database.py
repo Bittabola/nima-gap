@@ -4,7 +4,7 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -238,7 +238,7 @@ def find_similar_title(
     Returns the first matching article or None.
     """
     # Calculate cutoff date
-    cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
 
     # Only fetch id and title for comparison (more efficient)
     cursor = conn.execute(
@@ -278,7 +278,7 @@ def mark_url_seen(
                 content_hash,
                 status,
                 reason,
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             ),
         )
         conn.commit()
@@ -327,7 +327,7 @@ def create_article(
             local_video_path,
             media_type,
             uzbek_content,
-            datetime.utcnow().isoformat(),
+            datetime.now(timezone.utc).isoformat(),
         ),
     )
     conn.commit()
@@ -374,7 +374,7 @@ def mark_published(conn: sqlite3.Connection, article_id: int) -> None:
         SET status = 'published', published_at = ?
         WHERE id = ?
         """,
-        (datetime.utcnow().isoformat(), article_id),
+        (datetime.now(timezone.utc).isoformat(), article_id),
     )
     conn.commit()
 
