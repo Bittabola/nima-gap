@@ -35,7 +35,7 @@ from .database import (
     url_seen,
 )
 from .fetcher import FetchedArticle, create_http_client, fetch_source
-from .media import download_image, download_video
+from .media import cleanup_old_images, cleanup_old_videos, download_image, download_video
 
 
 async def fetch_job(
@@ -341,8 +341,10 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
     bot = app.bot
 
     remaining_interval = 300  # 5 minutes if there are remaining articles
+    cleanup_interval = 86400  # 24 hours
     last_remaining_check = 0
     last_heartbeat = 0
+    last_cleanup = 0
     has_remaining = False
     was_pending = False  # Track if queue was previously non-empty
 
@@ -411,6 +413,16 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
             if current_time - last_heartbeat >= 3600:
                 logger.info("💓 Heartbeat: Bot is running")
                 last_heartbeat = current_time
+
+            # Cleanup old cached media every 24 hours
+            if current_time - last_cleanup >= cleanup_interval:
+                images_removed = cleanup_old_images(config.data_dir)
+                videos_removed = cleanup_old_videos(config.data_dir)
+                if images_removed or videos_removed:
+                    logger.info(
+                        f"Media cleanup: {images_removed} images, {videos_removed} videos removed"
+                    )
+                last_cleanup = current_time
 
             await asyncio.sleep(60)  # Check every minute
 

@@ -1,8 +1,8 @@
 """Media downloading, validation and caching for images and videos."""
 
+import asyncio
 import hashlib
 import logging
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -282,8 +282,6 @@ async def download_video(
     Handles Reddit videos (merges video + audio) and other sources.
     Returns VideoResult with local path on success.
     """
-    import asyncio
-
     if not url:
         return VideoResult(success=False, error="No URL provided", original_url=url)
 
@@ -341,15 +339,34 @@ async def download_video(
                 url,
             ]
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,  # 2 minute timeout
+            # Use async subprocess to avoid blocking the event loop
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
 
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or "yt-dlp failed"
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=120  # 2 minute timeout
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                if local_path.exists():
+                    local_path.unlink()
+                if attempt < max_retries - 1:
+                    delay = 2 * (2**attempt)
+                    logger.warning(f"Download timeout, retrying in {delay}s...")
+                    last_error = "Download timeout"
+                    await asyncio.sleep(delay)
+                    continue
+                return VideoResult(
+                    success=False, error="Download timeout (>2 min)", original_url=url
+                )
+
+            if process.returncode != 0:
+                error_msg = stderr.decode().strip() or "yt-dlp failed"
                 # Clean up partial downloads
                 if local_path.exists():
                     local_path.unlink()
@@ -428,18 +445,6 @@ async def download_video(
                 file_size=file_size,
             )
 
-        except subprocess.TimeoutExpired:
-            if local_path.exists():
-                local_path.unlink()
-            if attempt < max_retries - 1:
-                delay = 2 * (2**attempt)
-                logger.warning(f"Download timeout, retrying in {delay}s...")
-                last_error = "Download timeout"
-                await asyncio.sleep(delay)
-                continue
-            return VideoResult(
-                success=False, error="Download timeout (>2 min)", original_url=url
-            )
         except FileNotFoundError:
             return VideoResult(
                 success=False, error="yt-dlp not installed", original_url=url

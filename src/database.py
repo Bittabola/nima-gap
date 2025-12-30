@@ -4,7 +4,7 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -227,19 +227,33 @@ def content_hash_exists(conn: sqlite3.Connection, content_hash: str) -> bool:
 
 
 def find_similar_title(
-    conn: sqlite3.Connection, title: str, threshold: float = 0.85
+    conn: sqlite3.Connection,
+    title: str,
+    threshold: float = 0.85,
+    max_age_days: int = 30,
 ) -> Optional[Article]:
     """
     Find an article with a similar title (above threshold).
+    Only checks articles from the last max_age_days to avoid O(n) scans.
     Returns the first matching article or None.
     """
+    # Calculate cutoff date
+    cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat()
+
+    # Only fetch id and title for comparison (more efficient)
     cursor = conn.execute(
-        "SELECT * FROM articles WHERE status IN ('pending', 'approved', 'published')"
+        """
+        SELECT id, original_title FROM articles
+        WHERE status IN ('pending', 'approved', 'published')
+        AND created_at >= ?
+        """,
+        (cutoff,),
     )
     for row in cursor:
         existing_title = row["original_title"]
         if title_similarity(title, existing_title) >= threshold:
-            return Article(**dict(row))
+            # Fetch full article only when match found
+            return get_article_by_id(conn, row["id"])
     return None
 
 

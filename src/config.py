@@ -24,7 +24,6 @@ class Config:
     # Paths and settings
     database_path: str
     data_dir: str
-    fetch_interval_hours: int
     publish_gap_minutes: int
     log_level: str
 
@@ -58,7 +57,6 @@ def load_config() -> Config:
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
         database_path=os.getenv("DATABASE_PATH", "data/olamda.db"),
         data_dir=os.getenv("DATA_DIR", "data"),
-        fetch_interval_hours=int(os.getenv("FETCH_INTERVAL_HOURS", "3")),
         publish_gap_minutes=int(os.getenv("PUBLISH_GAP_MINUTES", "60")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         max_new_articles_per_fetch=int(os.getenv("MAX_NEW_ARTICLES_PER_FETCH", "10")),
