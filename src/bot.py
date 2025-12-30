@@ -269,8 +269,8 @@ async def notify_admin_error(bot: Bot, admin_id: int, error: str) -> None:
             text=f"⚠️ <b>Xatolik:</b>\n\n{truncate(error, 1000)}",
             parse_mode="HTML",
         )
-    except Exception:
-        pass  # Don't fail if notification fails
+    except Exception as e:
+        logger.warning(f"Failed to send admin error notification: {e}")
 
 
 async def send_fetch_summary(
@@ -306,8 +306,8 @@ async def send_fetch_summary(
             text="\n".join(parts),
             parse_mode="HTML",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to send fetch summary: {e}")
 
 
 # Command handlers
@@ -403,9 +403,14 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await query.answer()
 
-    # Parse callback data
-    action, article_id_str = query.data.split(":")
-    article_id = int(article_id_str)
+    # Parse callback data with validation
+    try:
+        action, article_id_str = query.data.split(":", 1)
+        article_id = int(article_id_str)
+    except (ValueError, AttributeError) as e:
+        logger.warning(f"Invalid callback data '{query.data}': {e}")
+        await query.answer("❌ Noto'g'ri ma'lumot", show_alert=True)
+        return
 
     conn = context.bot_data.get("db_conn")
     article = get_article_by_id(conn, article_id)

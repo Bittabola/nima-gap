@@ -1,11 +1,22 @@
 """Configuration loader for environment variables and sources."""
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-import os
 
 import yaml
 from dotenv import load_dotenv
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    """Parse an integer from environment variable with clear error message."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(f"Invalid integer for {name}: '{value}'") from None
 
 
 @dataclass
@@ -49,16 +60,24 @@ def load_config() -> Config:
     with open(sources_path) as f:
         sources_data = yaml.safe_load(f)
 
+    # Parse required TELEGRAM_ADMIN_ID with clear error
+    try:
+        admin_id = int(os.environ["TELEGRAM_ADMIN_ID"])
+    except ValueError:
+        raise ValueError(
+            f"Invalid integer for TELEGRAM_ADMIN_ID: '{os.environ['TELEGRAM_ADMIN_ID']}'"
+        ) from None
+
     return Config(
         telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
         telegram_channel_id=os.environ["TELEGRAM_CHANNEL_ID"],
-        telegram_admin_id=int(os.environ["TELEGRAM_ADMIN_ID"]),
+        telegram_admin_id=admin_id,
         gemini_api_key=os.environ["GEMINI_API_KEY"],
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
         database_path=os.getenv("DATABASE_PATH", "data/olamda.db"),
         data_dir=os.getenv("DATA_DIR", "data"),
-        publish_gap_minutes=int(os.getenv("PUBLISH_GAP_MINUTES", "60")),
+        publish_gap_minutes=_parse_int_env("PUBLISH_GAP_MINUTES", 60),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
-        max_new_articles_per_fetch=int(os.getenv("MAX_NEW_ARTICLES_PER_FETCH", "10")),
+        max_new_articles_per_fetch=_parse_int_env("MAX_NEW_ARTICLES_PER_FETCH", 10),
         sources=sources_data.get("sources", []),
     )
