@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .ai import (
     classify_article,
@@ -314,7 +314,7 @@ async def publish_job(config, db_conn, bot) -> None:
     # Check time since last publish
     last_publish = get_last_publish_time(db_conn)
     if last_publish:
-        elapsed = datetime.utcnow() - last_publish
+        elapsed = datetime.now(timezone.utc) - last_publish
         if elapsed < timedelta(minutes=config.publish_gap_minutes):
             return  # Too soon
 
