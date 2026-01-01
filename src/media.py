@@ -348,7 +348,8 @@ async def download_video(
 
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=120  # 2 minute timeout
+                    process.communicate(),
+                    timeout=120,  # 2 minute timeout
                 )
             except asyncio.TimeoutError:
                 process.kill()

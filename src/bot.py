@@ -89,9 +89,14 @@ async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> No
 
     # Only show summary if it's different from the title
     summary_text = ""
-    if article.original_summary and article.original_summary.strip() != article.original_title.strip():
+    if (
+        article.original_summary
+        and article.original_summary.strip() != article.original_title.strip()
+    ):
         # Check if summary is not just the title with minor differences
-        if not article.original_title.strip().startswith(article.original_summary.strip()[:50]):
+        if not article.original_title.strip().startswith(
+            article.original_summary.strip()[:50]
+        ):
             summary_text = f"\n\n{truncate(article.original_summary, 500)}"
 
     message = f"""🆕 <b>Yangi hikoya topildi!</b> {media_indicator}

@@ -35,7 +35,12 @@ from .database import (
     url_seen,
 )
 from .fetcher import FetchedArticle, create_http_client, fetch_source
-from .media import cleanup_old_images, cleanup_old_videos, download_image, download_video
+from .media import (
+    cleanup_old_images,
+    cleanup_old_videos,
+    download_image,
+    download_video,
+)
 
 
 async def fetch_job(
