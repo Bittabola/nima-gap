@@ -82,17 +82,21 @@ def truncate(text: str, max_length: int) -> str:
 async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> None:
     """Send article to admin for approval with media preview."""
     # Format message
-    original_summary = truncate(article.original_summary, 500)
     uzbek_preview = truncate(article.uzbek_content or "", 1500)
 
     # Add media type indicator
     media_indicator = "🎬" if article.media_type == "video" else "🖼"
 
+    # Only show summary if it's different from the title
+    summary_text = ""
+    if article.original_summary and article.original_summary.strip() != article.original_title.strip():
+        # Check if summary is not just the title with minor differences
+        if not article.original_title.strip().startswith(article.original_summary.strip()[:50]):
+            summary_text = f"\n\n{truncate(article.original_summary, 500)}"
+
     message = f"""🆕 <b>Yangi hikoya topildi!</b> {media_indicator}
 
-📰 <b>Original:</b> {article.original_title}
-
-{original_summary}
+📰 <b>Original:</b> {article.original_title}{summary_text}
 
 ━━━━━━━━━━━━━━━
 
