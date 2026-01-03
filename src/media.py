@@ -256,6 +256,42 @@ class VideoResult:
     error: Optional[str] = None
     original_url: Optional[str] = None
     file_size: int = 0
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
+async def get_video_dimensions(video_path: str) -> tuple[Optional[int], Optional[int]]:
+    """Get video width and height using ffprobe."""
+    import json as json_module
+
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+            video_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+
+        if proc.returncode == 0:
+            data = json_module.loads(stdout.decode())
+            if data.get("streams"):
+                stream = data["streams"][0]
+                return stream.get("width"), stream.get("height")
+    except Exception as e:
+        logger.warning(f"Failed to get video dimensions: {e}")
+
+    return None, None
 
 
 def get_videos_dir(data_dir: str = "data") -> Path:
@@ -301,12 +337,16 @@ async def download_video(
                 error=f"Video too large: {file_size / 1024 / 1024:.1f} MB",
                 original_url=url,
             )
+        # Get dimensions for cached video
+        width, height = await get_video_dimensions(str(local_path))
         logger.debug(f"Video already cached: {local_path}")
         return VideoResult(
             success=True,
             local_path=str(local_path),
             original_url=url,
             file_size=file_size,
+            width=width,
+            height=height,
         )
 
     # Download with yt-dlp (with retries for transient errors)
@@ -436,6 +476,9 @@ async def download_video(
                     original_url=url,
                 )
 
+            # Get video dimensions for proper Telegram display
+            width, height = await get_video_dimensions(str(local_path))
+
             logger.info(
                 f"Downloaded video: {url} -> {local_path} ({file_size / 1024 / 1024:.1f} MB)"
             )
@@ -444,6 +487,8 @@ async def download_video(
                 local_path=str(local_path),
                 original_url=url,
                 file_size=file_size,
+                width=width,
+                height=height,
             )
 
         except FileNotFoundError:

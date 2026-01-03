@@ -135,6 +135,8 @@ async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> No
                         parse_mode="HTML",
                         reply_markup=keyboard,
                         supports_streaming=True,
+                        width=article.video_width,
+                        height=article.video_height,
                     )
                 return
             except Exception as e:
@@ -207,6 +209,8 @@ async def publish_article(
                     caption=truncate(content, MAX_CAPTION_LENGTH),
                     parse_mode="HTML",
                     supports_streaming=True,
+                    width=article.video_width,
+                    height=article.video_height,
                 )
             return True
         except Exception as e:

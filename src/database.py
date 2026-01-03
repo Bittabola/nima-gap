@@ -28,6 +28,8 @@ class Article:
     status: str
     created_at: str
     published_at: Optional[str]
+    video_width: Optional[int] = None
+    video_height: Optional[int] = None
 
 
 # Tracking params to strip from URLs for normalization
@@ -187,6 +189,18 @@ def init_database(db_path: str) -> sqlite3.Connection:
             "ALTER TABLE articles ADD COLUMN media_type TEXT NOT NULL DEFAULT 'image'"
         )
 
+    # Migration: add video_width column if missing
+    try:
+        conn.execute("SELECT video_width FROM articles LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE articles ADD COLUMN video_width INTEGER")
+
+    # Migration: add video_height column if missing
+    try:
+        conn.execute("SELECT video_height FROM articles LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE articles ADD COLUMN video_height INTEGER")
+
     conn.commit()
     return conn
 
@@ -306,6 +320,8 @@ def create_article(
     local_video_path: Optional[str],
     media_type: str,
     uzbek_content: str,
+    video_width: Optional[int] = None,
+    video_height: Optional[int] = None,
 ) -> int:
     """Create article with status 'pending'. Returns article ID."""
     cursor = conn.execute(
@@ -313,8 +329,8 @@ def create_article(
         INSERT INTO articles
         (source_name, original_url, original_title, original_summary,
          content_hash, image_url, local_image_path, local_video_path,
-         media_type, uzbek_content, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+         media_type, uzbek_content, status, created_at, video_width, video_height)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
         """,
         (
             source_name,
@@ -328,6 +344,8 @@ def create_article(
             media_type,
             uzbek_content,
             datetime.now(timezone.utc).isoformat(),
+            video_width,
+            video_height,
         ),
     )
     conn.commit()

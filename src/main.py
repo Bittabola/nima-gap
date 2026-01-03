@@ -216,6 +216,8 @@ async def fetch_job(
             # Download and cache media
             local_image_path = None
             local_video_path = None
+            video_width = None
+            video_height = None
 
             if article.media_type == "video" and article.image_url:
                 # For Reddit videos, use the post URL (yt-dlp handles it better)
@@ -231,6 +233,8 @@ async def fetch_job(
                 )
                 if video_result.success:
                     local_video_path = video_result.local_path
+                    video_width = video_result.width
+                    video_height = video_result.height
                     logger.debug(f"Cached video: {video_url} -> {local_video_path}")
                 else:
                     logger.warning(f"Video download failed: {video_result.error}")
@@ -263,6 +267,8 @@ async def fetch_job(
                 local_video_path=local_video_path,
                 media_type=article.media_type,
                 uzbek_content=translation.content,
+                video_width=video_width,
+                video_height=video_height,
             )
 
             # Send for approval
