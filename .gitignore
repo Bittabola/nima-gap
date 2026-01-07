@@ -9,7 +9,7 @@ venv/
 .env
 
 # Data
-data/*.db
+data/
 
 # Logs
 *.log
