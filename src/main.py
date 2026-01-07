@@ -47,7 +47,7 @@ async def fetch_job(
     config,
     db_conn,
     http_client,
-    gemini_model,
+    gemini_client,
     bot,
 ) -> int:
     """
@@ -174,7 +174,8 @@ async def fetch_job(
 
             # Classify content
             classification = await classify_article(
-                gemini_model,
+                gemini_client,
+                config.gemini_model,
                 article.title,
                 article.content,
                 media_url=article.image_url,
@@ -195,7 +196,8 @@ async def fetch_job(
 
             # Translate (with source name and media type for attribution)
             translation = await translate_article(
-                gemini_model,
+                gemini_client,
+                config.gemini_model,
                 article.title,
                 article.content,
                 article.url,
@@ -346,7 +348,7 @@ async def publish_job(config, db_conn, bot) -> None:
         logger.error(f"Failed to publish article {article.id}")
 
 
-async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
+async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
     """Main scheduling loop."""
     logger = logging.getLogger(__name__)
     bot = app.bot
@@ -367,7 +369,7 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
         )
         was_pending = True
     else:
-        remaining = await fetch_job(config, db_conn, http_client, gemini_model, bot)
+        remaining = await fetch_job(config, db_conn, http_client, gemini_client, bot)
         has_remaining = remaining > 0
         last_remaining_check = asyncio.get_running_loop().time()
 
@@ -388,7 +390,7 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
                     )
                 else:
                     remaining = await fetch_job(
-                        config, db_conn, http_client, gemini_model, bot
+                        config, db_conn, http_client, gemini_client, bot
                     )
                     has_remaining = remaining > 0
                     last_remaining_check = current_time
@@ -398,7 +400,7 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
             if queue_empty and was_pending:
                 logger.info("Queue empty, fetching new articles...")
                 remaining = await fetch_job(
-                    config, db_conn, http_client, gemini_model, bot
+                    config, db_conn, http_client, gemini_client, bot
                 )
                 has_remaining = remaining > 0
                 last_remaining_check = current_time
@@ -409,7 +411,7 @@ async def scheduler_loop(config, db_conn, http_client, gemini_model, app):
                 if current_time - last_remaining_check >= remaining_interval:
                     logger.info("Processing remaining articles...")
                     remaining = await fetch_job(
-                        config, db_conn, http_client, gemini_model, bot
+                        config, db_conn, http_client, gemini_client, bot
                     )
                     has_remaining = remaining > 0
                     last_remaining_check = current_time
@@ -463,7 +465,7 @@ async def main() -> None:
     http_client = create_http_client()
 
     # Initialize Gemini
-    gemini_model = init_gemini(config.gemini_api_key, config.gemini_model)
+    gemini_client = init_gemini(config.gemini_api_key)
     logger.info(f"Gemini initialized with model: {config.gemini_model}")
 
     # Create Telegram bot
@@ -482,7 +484,7 @@ async def main() -> None:
         try:
             # Run scheduler in parallel with bot polling
             scheduler_task = asyncio.create_task(
-                scheduler_loop(config, db_conn, http_client, gemini_model, app)
+                scheduler_loop(config, db_conn, http_client, gemini_client, app)
             )
 
             # Start polling (this blocks)

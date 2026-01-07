@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass
 from typing import Optional
 
-import google.generativeai as genai
+from google import genai
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +137,9 @@ class TranslationResult:
     error: Optional[str] = None
 
 
-def init_gemini(api_key: str, model: str = "gemini-1.5-flash") -> genai.GenerativeModel:
-    """Initialize Gemini client with specified model."""
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(model)
+def init_gemini(api_key: str) -> genai.Client:
+    """Initialize Gemini client."""
+    return genai.Client(api_key=api_key)
 
 
 CLASSIFIER_PROMPT = """You are a content classifier for a visual-first Telegram channel focused on amazing, curious, and viral content.
@@ -252,7 +251,8 @@ Write the complete formatted Telegram post in Uzbek:"""
 
 
 async def classify_article(
-    model: genai.GenerativeModel,
+    client: genai.Client,
+    model: str,
     title: str,
     content: str,
     media_url: Optional[str] = None,
@@ -276,8 +276,9 @@ async def classify_article(
 
         # Use backoff for API call
         response = await call_with_backoff(
-            model.generate_content_async,
-            prompt,
+            client.aio.models.generate_content,
+            model=model,
+            contents=prompt,
         )
 
         _token_stats["classify_calls"] += 1
@@ -304,7 +305,8 @@ async def classify_article(
 
 
 async def translate_article(
-    model: genai.GenerativeModel,
+    client: genai.Client,
+    model: str,
     title: str,
     content: str,
     source_url: str,
@@ -333,8 +335,9 @@ async def translate_article(
 
         # Use backoff for API call
         response = await call_with_backoff(
-            model.generate_content_async,
-            prompt,
+            client.aio.models.generate_content,
+            model=model,
+            contents=prompt,
         )
 
         _token_stats["translate_calls"] += 1
