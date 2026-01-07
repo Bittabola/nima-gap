@@ -21,3 +21,7 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local docs
+AGENTS.md
+subtitles-plan.md
