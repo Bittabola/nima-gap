@@ -1,0 +1,12 @@
+services:
+  bot:
+    image: olamda_nima_gap
+    container_name: olamda_nima_gap
+    restart: unless-stopped
+    env_file:
+      - /home/bittabola/docker/nima-gap/.env
+    volumes:
+      - /home/bittabola/docker/nima-gap/data:/app/data
+      - /home/bittabola/docker/nima-gap/config:/app/config:ro
+    environment:
+      - TZ=Asia/Tashkent
