@@ -25,3 +25,11 @@ Thumbs.db
 # Local docs
 AGENTS.md
 subtitles-plan.md
+olamda-nima-gap-plan.md
+deploy.sh
+
+# AI assistant configs
+.claude/
+
+# Ruff cache
+.ruff_cache/
