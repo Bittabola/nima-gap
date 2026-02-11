@@ -159,6 +159,18 @@ EXCLUDE content that:
 - Contains violence, tragedy, or disturbing imagery
 - Is a product promotion or advertisement
 - Has low visual impact or is just a news headline
+- Criticizes or discusses government officials, presidents, or political leaders
+- Mentions corruption, protests, riots, or civil unrest
+- Touches on ethnic or regional separatism, territorial disputes, or sovereignty
+- Discusses human rights abuses, forced labor, or torture
+- Contains religious extremism, fundamentalism, or unapproved religious commentary
+- Promotes or references drugs, alcohol abuse, or illegal substances
+- Contains sexual or pornographic content
+- Incites national, racial, ethnic, or religious hatred or discrimination
+- Discusses LGBTQ+ topics
+- References terrorism, extremism, or radicalization
+- Mentions military conflicts, war propaganda, or sanctions
+- Contains defamation or insults toward any public figures or institutions
 
 Article Title: {title}
 Article Content: {content}
