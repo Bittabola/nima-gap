@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from .ai import (
@@ -15,7 +16,6 @@ from .bot import (
     create_bot,
     notify_admin_error,
     publish_article,
-    send_approval_request,
     send_fetch_summary,
 )
 from .config import load_config
@@ -25,13 +25,14 @@ from .database import (
     content_hash_exists,
     create_article,
     find_similar_title,
-    get_article_by_id,
     get_last_publish_time,
     get_next_publishable,
     get_pending_count,
     init_database,
     mark_published,
     mark_url_seen,
+    reject_all_pending,
+    update_article_status,
     url_seen,
 )
 from .fetcher import FetchedArticle, create_http_client, fetch_source
@@ -233,14 +234,46 @@ async def fetch_job(
                     video_url,
                     data_dir=config.data_dir,
                 )
-                if video_result.success:
-                    local_video_path = video_result.local_path
-                    video_width = video_result.width
-                    video_height = video_result.height
-                    logger.debug(f"Cached video: {video_url} -> {local_video_path}")
+                if video_result.success and video_result.local_path:
+                    # Verify the downloaded video file exists and is valid
+                    video_file_size = (
+                        os.path.getsize(video_result.local_path)
+                        if os.path.exists(video_result.local_path)
+                        else 0
+                    )
+                    if video_file_size > 0:
+                        local_video_path = video_result.local_path
+                        video_width = video_result.width
+                        video_height = video_result.height
+                        logger.info(
+                            f"Video verified: {video_url} -> {local_video_path} ({video_file_size} bytes)"
+                        )
+                    else:
+                        logger.warning(
+                            f"Video file empty or missing after download: {video_result.local_path}"
+                        )
+                        mark_url_seen(
+                            db_conn,
+                            article.url,
+                            content_hash,
+                            "failed",
+                            "video file empty after download",
+                        )
+                        failed += 1
+                        continue
                 else:
-                    logger.warning(f"Video download failed: {video_result.error}")
-                    # Fall back to treating as image-less post
+                    logger.warning(
+                        f"Video download failed for video post, skipping: {video_result.error}"
+                    )
+                    mark_url_seen(
+                        db_conn,
+                        article.url,
+                        content_hash,
+                        "failed",
+                        f"video download failed: {video_result.error}",
+                    )
+                    failed += 1
+                    continue
             elif article.image_url:
                 # Download image
                 image_result = await download_image(
@@ -273,9 +306,8 @@ async def fetch_job(
                 video_height=video_height,
             )
 
-            # Send for approval
-            saved_article = get_article_by_id(db_conn, article_id)
-            await send_approval_request(bot, config.telegram_admin_id, saved_article)
+            # Auto-publish: approve directly, skip manual approval
+            update_article_status(db_conn, article_id, "approved")
 
             new_articles += 1
             logger.info(f"New article: {article.title[:50]}")
@@ -460,6 +492,11 @@ async def main() -> None:
     # Initialize database
     db_conn = init_database(config.database_path)
     logger.info("Database initialized")
+
+    # Reject all old pending articles (auto-publish mode, clean slate)
+    rejected_count = reject_all_pending(db_conn)
+    if rejected_count > 0:
+        logger.info(f"Rejected {rejected_count} old pending articles")
 
     # Initialize HTTP client
     http_client = create_http_client()

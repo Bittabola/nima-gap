@@ -203,7 +203,7 @@ async def publish_article(
     if article.media_type == "video" and article.local_video_path:
         try:
             with open(article.local_video_path, "rb") as video_file:
-                await bot.send_video(
+                sent_message = await bot.send_video(
                     chat_id=channel_id,
                     video=video_file,
                     caption=truncate(content, MAX_CAPTION_LENGTH),
@@ -212,7 +212,22 @@ async def publish_article(
                     width=article.video_width,
                     height=article.video_height,
                 )
-            return True
+            # Verify the video was uploaded to Telegram correctly
+            if sent_message and sent_message.video:
+                logger.info(
+                    f"Video upload verified for article {article.id}: "
+                    f"file_id={sent_message.video.file_id}, "
+                    f"size={sent_message.video.file_size} bytes"
+                )
+                return True
+            else:
+                media_failed = True
+                media_error = (
+                    "Telegram accepted the request but no video object in response"
+                )
+                logger.warning(
+                    f"Video upload not confirmed for article {article.id}: response has no video"
+                )
         except Exception as e:
             media_failed = True
             media_error = str(e)
