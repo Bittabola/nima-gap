@@ -428,6 +428,14 @@ def get_approved_count(conn: sqlite3.Connection) -> int:
     return cursor.fetchone()[0]
 
 
+def get_queue_count(conn: sqlite3.Connection) -> int:
+    """Count articles in the publish queue (pending + approved)."""
+    cursor = conn.execute(
+        "SELECT COUNT(*) FROM articles WHERE status IN ('pending', 'approved')"
+    )
+    return cursor.fetchone()[0]
+
+
 def reject_all_pending(conn: sqlite3.Connection) -> int:
     """Reject all pending articles. Returns number of articles rejected."""
     cursor = conn.execute(

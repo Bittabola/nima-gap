@@ -27,7 +27,7 @@ from .database import (
     find_similar_title,
     get_last_publish_time,
     get_next_publishable,
-    get_pending_count,
+    get_queue_count,
     init_database,
     mark_published,
     mark_url_seen,
@@ -393,11 +393,11 @@ async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
     has_remaining = False
     was_pending = False  # Track if queue was previously non-empty
 
-    # Run initial fetch only if no pending articles
-    pending_count = get_pending_count(db_conn)
+    # Run initial fetch only if no articles in queue
+    pending_count = get_queue_count(db_conn)
     if pending_count > 0:
         logger.info(
-            f"Skipping initial fetch: {pending_count} articles pending approval"
+            f"Skipping initial fetch: {pending_count} articles in queue"
         )
         was_pending = True
     else:
@@ -409,16 +409,16 @@ async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
         try:
             current_time = asyncio.get_running_loop().time()
 
-            # Check pending articles
-            pending_count = get_pending_count(db_conn)
-            queue_empty = pending_count == 0
+            # Check articles in queue (pending + approved)
+            queue_count = get_queue_count(db_conn)
+            queue_empty = queue_count == 0
 
             # Check for manual fetch trigger
             if app.bot_data.get("fetch_now"):
                 app.bot_data["fetch_now"] = False
                 if not queue_empty:
                     logger.info(
-                        f"Manual fetch skipped: {pending_count} articles pending approval"
+                        f"Manual fetch skipped: {queue_count} articles in queue"
                     )
                 else:
                     remaining = await fetch_job(
