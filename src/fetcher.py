@@ -197,7 +197,10 @@ def create_http_client() -> httpx.AsyncClient:
         transport=transport,
         timeout=httpx.Timeout(30.0),
         follow_redirects=True,
-        headers={"User-Agent": "Olamda-Nima-Gap/1.0"},
+        headers={
+            "User-Agent": "Olamda-Nima-Gap/1.0",
+            "Accept-Encoding": "gzip, deflate, br",
+        },
     )
 
 
