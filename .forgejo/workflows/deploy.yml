@@ -1,0 +1,42 @@
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: git.fayzullaev.ca
+  IMAGE: git.fayzullaev.ca/${{ github.repository }}:latest
+
+jobs:
+  deploy:
+    runs-on: docker
+    container:
+      image: docker:cli
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache git openssh-client
+
+      - name: Checkout
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git clone --depth 1 --branch "$GITHUB_REF_NAME" \
+            "https://oauth2:${TOKEN}@${REGISTRY}/${GITHUB_REPOSITORY}.git" .
+
+      - name: Build and push
+        run: |
+          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u ${{ github.actor }} --password-stdin
+          docker build -f docker/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy to VPS
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          mkdir -p ~/.ssh
+          echo "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "${DEPLOY_USER}@${VPS_HOST}" \
+            "bash -c 'docker pull ${IMAGE} && cd ~/docker/${REPO_NAME} && docker compose up -d'"
