@@ -233,8 +233,11 @@ async def publish_article(
             media_error = str(e)
             logger.warning(f"Video send failed for article {article.id}: {e}")
 
-    # Try with image if available (and not a video post that failed)
-    if not media_failed:
+    # Try with image if available (including as fallback for failed video)
+    if not media_failed or (
+        article.media_type == "video"
+        and (article.local_image_path or article.image_url)
+    ):
         image_path = article.local_image_path or article.image_url
         if image_path:
             try:
@@ -441,6 +444,7 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     conn = context.bot_data.get("db_conn")
+    db_lock = context.bot_data.get("db_lock")
     article = get_article_by_id(conn, article_id)
 
     if not article:
@@ -448,14 +452,22 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if action == "approve":
-        update_article_status(conn, article_id, "approved")
+        if db_lock:
+            async with db_lock:
+                update_article_status(conn, article_id, "approved")
+        else:
+            update_article_status(conn, article_id, "approved")
         response_text = (
             f"✅ <b>Tasdiqlandi</b>\n\n"
             f"📰 {article.original_title}\n\n"
             f"Nashr qilish navbatiga qo'shildi."
         )
     else:  # reject
-        update_article_status(conn, article_id, "rejected")
+        if db_lock:
+            async with db_lock:
+                update_article_status(conn, article_id, "rejected")
+        else:
+            update_article_status(conn, article_id, "rejected")
         response_text = f"❌ <b>Rad etildi</b>\n\n📰 {article.original_title}"
 
     # Use appropriate edit method based on message type
@@ -475,7 +487,11 @@ async def approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 def create_bot(
-    token: str, admin_id: int, channel_id: str, db_conn: "sqlite3.Connection"
+    token: str,
+    admin_id: int,
+    channel_id: str,
+    db_conn: "sqlite3.Connection",
+    db_lock: "asyncio.Lock | None" = None,
 ) -> Application:
     """Create and configure Telegram bot application."""
     app = Application.builder().token(token).build()
@@ -484,6 +500,7 @@ def create_bot(
     app.bot_data["admin_id"] = admin_id
     app.bot_data["channel_id"] = channel_id
     app.bot_data["db_conn"] = db_conn
+    app.bot_data["db_lock"] = db_lock
     app.bot_data["fetch_now"] = False
 
     # Register handlers

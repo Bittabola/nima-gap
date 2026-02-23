@@ -99,8 +99,8 @@ async def call_with_backoff(
                 ]
             )
 
-            if not (is_rate_limit or is_transient) and attempt > 0:
-                # Non-retryable error after first attempt
+            if not (is_rate_limit or is_transient):
+                # Non-retryable error, don't waste time retrying
                 logger.error(f"Non-retryable error: {e}")
                 raise
 
@@ -305,7 +305,16 @@ async def classify_article(
                 text = text[4:]
         text = text.strip()
 
-        result = json.loads(text)
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Failed to parse classification JSON: {e}. Raw response: {text[:200]}"
+            )
+            return ClassificationResult(
+                is_relevant=False, reason=f"JSON parse error: {e}"
+            )
+
         return ClassificationResult(
             is_relevant=result.get("is_relevant", False),
             reason=result.get("reason", ""),

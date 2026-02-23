@@ -38,5 +38,6 @@ jobs:
           mkdir -p ~/.ssh
           echo "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "${DEPLOY_USER}@${VPS_HOST}" \
+          ssh-keyscan -H "${VPS_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -o StrictHostKeyChecking=yes -i ~/.ssh/deploy_key "${DEPLOY_USER}@${VPS_HOST}" \
             "bash -c 'docker pull ${IMAGE} && cd ~/docker/${REPO_NAME} && docker compose up -d'"

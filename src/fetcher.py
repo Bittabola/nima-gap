@@ -1,5 +1,6 @@
 """RSS and Reddit content fetching."""
 
+import asyncio
 import html
 import logging
 import re
@@ -212,7 +213,8 @@ async def fetch_rss(http_client: httpx.AsyncClient, url: str) -> list[FetchedArt
         response = await http_client.get(url)
         response.raise_for_status()
 
-        feed = feedparser.parse(response.text)
+        loop = asyncio.get_running_loop()
+        feed = await loop.run_in_executor(None, feedparser.parse, response.text)
 
         for entry in feed.entries[:20]:  # Limit to recent 20
             # Extract content

@@ -55,10 +55,18 @@ def load_config() -> Config:
     """
     load_dotenv()
 
-    # Load sources.yaml
+    # Load and validate sources.yaml
     sources_path = Path(__file__).parent.parent / "config" / "sources.yaml"
     with open(sources_path) as f:
         sources_data = yaml.safe_load(f)
+    if not isinstance(sources_data, dict) or "sources" not in sources_data:
+        raise ValueError(
+            f"Invalid sources.yaml: expected a dict with 'sources' key, got {type(sources_data).__name__}"
+        )
+    if not isinstance(sources_data["sources"], list):
+        raise ValueError(
+            f"Invalid sources.yaml: 'sources' must be a list, got {type(sources_data['sources']).__name__}"
+        )
 
     # Parse required TELEGRAM_ADMIN_ID with clear error
     try:

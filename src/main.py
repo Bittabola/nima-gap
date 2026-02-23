@@ -1,8 +1,10 @@
 """Main entry point and scheduling loop."""
 
 import asyncio
+import functools
 import logging
 import os
+import signal
 from datetime import datetime, timedelta, timezone
 
 from .ai import (
@@ -21,6 +23,7 @@ from .bot import (
 from .config import load_config
 from .database import (
     article_exists,
+    cleanup_old_seen_urls,
     compute_content_hash,
     content_hash_exists,
     create_article,
@@ -47,6 +50,7 @@ from .media import (
 async def fetch_job(
     config,
     db_conn,
+    db_lock,
     http_client,
     gemini_client,
     bot,
@@ -127,13 +131,14 @@ async def fetch_job(
             # Check content hash for similar content from different sources
             if content_hash_exists(db_conn, content_hash):
                 logger.debug(f"Duplicate content hash: {article.title[:50]}")
-                mark_url_seen(
-                    db_conn,
-                    article.url,
-                    content_hash,
-                    "duplicate",
-                    "content hash match",
-                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn,
+                        article.url,
+                        content_hash,
+                        "duplicate",
+                        "content hash match",
+                    )
                 skipped_duplicates += 1
                 continue
 
@@ -143,22 +148,24 @@ async def fetch_job(
                 logger.debug(
                     f"Similar title found: {article.title[:50]} ~ {similar.original_title[:50]}"
                 )
-                mark_url_seen(
-                    db_conn,
-                    article.url,
-                    content_hash,
-                    "duplicate",
-                    f"similar to article {similar.id}",
-                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn,
+                        article.url,
+                        content_hash,
+                        "duplicate",
+                        f"similar to article {similar.id}",
+                    )
                 skipped_duplicates += 1
                 continue
 
             # Pre-filter: skip posts without media (save API calls)
             if not article.image_url:
                 logger.debug(f"Skipped (no media): {article.title[:50]}")
-                mark_url_seen(
-                    db_conn, article.url, content_hash, "irrelevant", "no media"
-                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn, article.url, content_hash, "irrelevant", "no media"
+                    )
                 skipped_irrelevant += 1
                 continue
 
@@ -167,9 +174,10 @@ async def fetch_job(
                 logger.debug(
                     f"Skipped (low karma {article.score}): {article.title[:50]}"
                 )
-                mark_url_seen(
-                    db_conn, article.url, content_hash, "irrelevant", "low karma"
-                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn, article.url, content_hash, "irrelevant", "low karma"
+                    )
                 skipped_irrelevant += 1
                 continue
 
@@ -185,13 +193,14 @@ async def fetch_job(
 
             if not classification.is_relevant:
                 logger.debug(f"Skipped: {article.title[:50]} - {classification.reason}")
-                mark_url_seen(
-                    db_conn,
-                    article.url,
-                    content_hash,
-                    "irrelevant",
-                    classification.reason,
-                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn,
+                        article.url,
+                        content_hash,
+                        "irrelevant",
+                        classification.reason,
+                    )
                 skipped_irrelevant += 1
                 continue
 
@@ -210,9 +219,10 @@ async def fetch_job(
                 logger.warning(
                     f"Translation failed for {article.url}: {translation.error}"
                 )
-                mark_url_seen(
-                    db_conn, article.url, content_hash, "failed", translation.error
-                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn, article.url, content_hash, "failed", translation.error
+                    )
                 failed += 1
                 continue
 
@@ -252,26 +262,28 @@ async def fetch_job(
                         logger.warning(
                             f"Video file empty or missing after download: {video_result.local_path}"
                         )
-                        mark_url_seen(
-                            db_conn,
-                            article.url,
-                            content_hash,
-                            "failed",
-                            "video file empty after download",
-                        )
+                        async with db_lock:
+                            mark_url_seen(
+                                db_conn,
+                                article.url,
+                                content_hash,
+                                "failed",
+                                "video file empty after download",
+                            )
                         failed += 1
                         continue
                 else:
                     logger.warning(
                         f"Video download failed for video post, skipping: {video_result.error}"
                     )
-                    mark_url_seen(
-                        db_conn,
-                        article.url,
-                        content_hash,
-                        "failed",
-                        f"video download failed: {video_result.error}",
-                    )
+                    async with db_lock:
+                        mark_url_seen(
+                            db_conn,
+                            article.url,
+                            content_hash,
+                            "failed",
+                            f"video download failed: {video_result.error}",
+                        )
                     failed += 1
                     continue
             elif article.image_url:
@@ -290,24 +302,25 @@ async def fetch_job(
                     logger.warning(f"Image download failed: {image_result.error}")
 
             # Save to database
-            article_id = create_article(
-                db_conn,
-                source_name=source_name,
-                original_url=article.url,
-                original_title=article.title,
-                original_summary=article.content[:2000],
-                content_hash=content_hash,
-                image_url=article.image_url,
-                local_image_path=local_image_path,
-                local_video_path=local_video_path,
-                media_type=article.media_type,
-                uzbek_content=translation.content,
-                video_width=video_width,
-                video_height=video_height,
-            )
+            async with db_lock:
+                article_id = create_article(
+                    db_conn,
+                    source_name=source_name,
+                    original_url=article.url,
+                    original_title=article.title,
+                    original_summary=article.content[:2000],
+                    content_hash=content_hash,
+                    image_url=article.image_url,
+                    local_image_path=local_image_path,
+                    local_video_path=local_video_path,
+                    media_type=article.media_type,
+                    uzbek_content=translation.content,
+                    video_width=video_width,
+                    video_height=video_height,
+                )
 
-            # Auto-publish: approve directly, skip manual approval
-            update_article_status(db_conn, article_id, "approved")
+                # Auto-publish: approve directly, skip manual approval
+                update_article_status(db_conn, article_id, "approved")
 
             new_articles += 1
             logger.info(f"New article: {article.title[:50]}")
@@ -352,7 +365,7 @@ async def fetch_job(
     return remaining
 
 
-async def publish_job(config, db_conn, bot) -> None:
+async def publish_job(config, db_conn, db_lock, bot) -> None:
     """Publish approved articles with rate limiting."""
     logger = logging.getLogger(__name__)
 
@@ -374,13 +387,14 @@ async def publish_job(config, db_conn, bot) -> None:
     )
 
     if success:
-        mark_published(db_conn, article.id)
+        async with db_lock:
+            mark_published(db_conn, article.id)
         logger.info(f"Published: {article.original_title[:50]}")
     else:
         logger.error(f"Failed to publish article {article.id}")
 
 
-async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
+async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, app):
     """Main scheduling loop."""
     logger = logging.getLogger(__name__)
     bot = app.bot
@@ -396,12 +410,12 @@ async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
     # Run initial fetch only if no articles in queue
     pending_count = get_queue_count(db_conn)
     if pending_count > 0:
-        logger.info(
-            f"Skipping initial fetch: {pending_count} articles in queue"
-        )
+        logger.info(f"Skipping initial fetch: {pending_count} articles in queue")
         was_pending = True
     else:
-        remaining = await fetch_job(config, db_conn, http_client, gemini_client, bot)
+        remaining = await fetch_job(
+            config, db_conn, db_lock, http_client, gemini_client, bot
+        )
         has_remaining = remaining > 0
         last_remaining_check = asyncio.get_running_loop().time()
 
@@ -422,7 +436,7 @@ async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
                     )
                 else:
                     remaining = await fetch_job(
-                        config, db_conn, http_client, gemini_client, bot
+                        config, db_conn, db_lock, http_client, gemini_client, bot
                     )
                     has_remaining = remaining > 0
                     last_remaining_check = current_time
@@ -432,7 +446,7 @@ async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
             if queue_empty and was_pending:
                 logger.info("Queue empty, fetching new articles...")
                 remaining = await fetch_job(
-                    config, db_conn, http_client, gemini_client, bot
+                    config, db_conn, db_lock, http_client, gemini_client, bot
                 )
                 has_remaining = remaining > 0
                 last_remaining_check = current_time
@@ -443,7 +457,7 @@ async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
                 if current_time - last_remaining_check >= remaining_interval:
                     logger.info("Processing remaining articles...")
                     remaining = await fetch_job(
-                        config, db_conn, http_client, gemini_client, bot
+                        config, db_conn, db_lock, http_client, gemini_client, bot
                     )
                     has_remaining = remaining > 0
                     last_remaining_check = current_time
@@ -452,20 +466,31 @@ async def scheduler_loop(config, db_conn, http_client, gemini_client, app):
             was_pending = not queue_empty
 
             # Check publishing every minute
-            await publish_job(config, db_conn, bot)
+            await publish_job(config, db_conn, db_lock, bot)
 
             # Heartbeat log every hour
             if current_time - last_heartbeat >= 3600:
                 logger.info("💓 Heartbeat: Bot is running")
                 last_heartbeat = current_time
 
-            # Cleanup old cached media every 24 hours
+            # Cleanup old cached media and stale seen_urls every 24 hours
             if current_time - last_cleanup >= cleanup_interval:
-                images_removed = cleanup_old_images(config.data_dir)
-                videos_removed = cleanup_old_videos(config.data_dir)
+                loop = asyncio.get_running_loop()
+                images_removed = await loop.run_in_executor(
+                    None, functools.partial(cleanup_old_images, config.data_dir)
+                )
+                videos_removed = await loop.run_in_executor(
+                    None, functools.partial(cleanup_old_videos, config.data_dir)
+                )
                 if images_removed or videos_removed:
                     logger.info(
                         f"Media cleanup: {images_removed} images, {videos_removed} videos removed"
+                    )
+                async with db_lock:
+                    urls_removed = cleanup_old_seen_urls(db_conn)
+                if urls_removed:
+                    logger.info(
+                        f"Seen URLs cleanup: {urls_removed} old entries removed"
                     )
                 last_cleanup = current_time
 
@@ -481,58 +506,90 @@ async def main() -> None:
     # Load config
     config = load_config()
 
-    # Configure logging
+    # Validate and configure logging level
+    valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+    log_level = config.log_level.upper()
+    if log_level not in valid_levels:
+        log_level = "INFO"
     logging.basicConfig(
-        level=getattr(logging, config.log_level),
+        level=getattr(logging, log_level),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
+    if log_level != config.log_level.upper():
+        logger.warning(f"Invalid LOG_LEVEL '{config.log_level}', falling back to INFO")
     logger.info("Starting Olamda nima gap? bot...")
 
     # Initialize database
     db_conn = init_database(config.database_path)
     logger.info("Database initialized")
 
-    # Reject all old pending articles (auto-publish mode, clean slate)
-    rejected_count = reject_all_pending(db_conn)
-    if rejected_count > 0:
-        logger.info(f"Rejected {rejected_count} old pending articles")
+    # Create async lock for DB write operations
+    db_lock = asyncio.Lock()
 
-    # Initialize HTTP client
-    http_client = create_http_client()
+    try:
+        # Reject all old pending articles (auto-publish mode, clean slate)
+        rejected_count = reject_all_pending(db_conn)
+        if rejected_count > 0:
+            logger.info(f"Rejected {rejected_count} old pending articles")
 
-    # Initialize Gemini
-    gemini_client = init_gemini(config.gemini_api_key)
-    logger.info(f"Gemini initialized with model: {config.gemini_model}")
+        # Initialize HTTP client with proper cleanup on init failure
+        http_client = create_http_client()
+        try:
+            gemini_client = init_gemini(config.gemini_api_key)
+            logger.info(f"Gemini initialized with model: {config.gemini_model}")
 
-    # Create Telegram bot
-    app = create_bot(
-        config.telegram_bot_token,
-        config.telegram_admin_id,
-        config.telegram_channel_id,
-        db_conn,
-    )
+            app = create_bot(
+                config.telegram_bot_token,
+                config.telegram_admin_id,
+                config.telegram_channel_id,
+                db_conn,
+                db_lock,
+            )
+        except Exception:
+            await http_client.aclose()
+            raise
+    except Exception:
+        db_conn.close()
+        raise
 
     # Start bot and scheduler
     async with app:
         await app.start()
         logger.info("Telegram bot started")
 
+        scheduler_task = None
         try:
             # Run scheduler in parallel with bot polling
             scheduler_task = asyncio.create_task(
-                scheduler_loop(config, db_conn, http_client, gemini_client, app)
+                scheduler_loop(
+                    config, db_conn, db_lock, http_client, gemini_client, app
+                )
             )
 
-            # Start polling (this blocks)
+            # Register signal handler for graceful shutdown under Docker
+            try:
+                loop = asyncio.get_running_loop()
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    loop.add_signal_handler(sig, scheduler_task.cancel)
+            except NotImplementedError:
+                logger.warning("Signal handlers not supported on this platform")
+
+            # Start polling (returns immediately in v21+)
             await app.updater.start_polling(drop_pending_updates=True)
 
-            # Wait for scheduler (won't reach here normally)
+            # Wait for scheduler
             await scheduler_task
 
         except asyncio.CancelledError:
             logger.info("Shutting down...")
         finally:
+            if scheduler_task and not scheduler_task.done():
+                scheduler_task.cancel()
+                try:
+                    await scheduler_task
+                except asyncio.CancelledError:
+                    pass
             await app.updater.stop()
             await app.stop()
             await http_client.aclose()

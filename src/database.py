@@ -28,6 +28,7 @@ class Article:
     status: str
     created_at: str
     published_at: Optional[str]
+    normalized_url: Optional[str] = None
     video_width: Optional[int] = None
     video_height: Optional[int] = None
 
@@ -115,12 +116,14 @@ def init_database(db_path: str) -> sqlite3.Connection:
     """Initialize database and create tables."""
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS articles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_name TEXT NOT NULL,
             original_url TEXT NOT NULL UNIQUE,
+            normalized_url TEXT,
             original_title TEXT NOT NULL,
             original_summary TEXT NOT NULL,
             content_hash TEXT,
@@ -145,6 +148,11 @@ def init_database(db_path: str) -> sqlite3.Connection:
         ON articles(content_hash)
     """)
 
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_articles_normalized_url
+        ON articles(normalized_url)
+    """)
+
     # Table to track all seen URLs (including skipped/failed)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS seen_urls (
@@ -161,6 +169,11 @@ def init_database(db_path: str) -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_seen_urls_content_hash
         ON seen_urls(content_hash)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_seen_urls_created_at
+        ON seen_urls(created_at)
     """)
 
     # Migration: add content_hash column if missing (for existing databases)
@@ -201,16 +214,28 @@ def init_database(db_path: str) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE articles ADD COLUMN video_height INTEGER")
 
+    # Migration: add normalized_url column and backfill
+    try:
+        conn.execute("SELECT normalized_url FROM articles LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE articles ADD COLUMN normalized_url TEXT")
+        rows = conn.execute("SELECT id, original_url FROM articles").fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE articles SET normalized_url = ? WHERE id = ?",
+                (normalize_url(row["original_url"]), row["id"]),
+            )
+
     conn.commit()
     return conn
 
 
 def article_exists(conn: sqlite3.Connection, url: str) -> bool:
-    """Check if article URL already exists (uses normalized URL)."""
+    """Check if article URL already exists (uses indexed normalized_url column)."""
     normalized = normalize_url(url)
     cursor = conn.execute(
-        "SELECT 1 FROM articles WHERE original_url = ? OR original_url = ?",
-        (url, normalized),
+        "SELECT 1 FROM articles WHERE normalized_url = ?",
+        (normalized,),
     )
     return cursor.fetchone() is not None
 
@@ -226,16 +251,14 @@ def url_seen(conn: sqlite3.Connection, url: str) -> bool:
 
 def content_hash_exists(conn: sqlite3.Connection, content_hash: str) -> bool:
     """Check if content hash already exists (duplicate content detection)."""
-    # Check in articles
     cursor = conn.execute(
-        "SELECT 1 FROM articles WHERE content_hash = ?", (content_hash,)
-    )
-    if cursor.fetchone():
-        return True
-
-    # Check in seen_urls
-    cursor = conn.execute(
-        "SELECT 1 FROM seen_urls WHERE content_hash = ?", (content_hash,)
+        """
+        SELECT 1 FROM articles WHERE content_hash = ?
+        UNION ALL
+        SELECT 1 FROM seen_urls WHERE content_hash = ?
+        LIMIT 1
+        """,
+        (content_hash, content_hash),
     )
     return cursor.fetchone() is not None
 
@@ -255,11 +278,14 @@ def find_similar_title(
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
 
     # Only fetch id and title for comparison (more efficient)
+    # Limit to 500 most recent to avoid O(n) scans on large databases
     cursor = conn.execute(
         """
         SELECT id, original_title FROM articles
         WHERE status IN ('pending', 'approved', 'published')
         AND created_at >= ?
+        ORDER BY created_at DESC
+        LIMIT 500
         """,
         (cutoff,),
     )
@@ -324,17 +350,19 @@ def create_article(
     video_height: Optional[int] = None,
 ) -> int:
     """Create article with status 'pending'. Returns article ID."""
+    normalized = normalize_url(original_url)
     cursor = conn.execute(
         """
         INSERT INTO articles
-        (source_name, original_url, original_title, original_summary,
+        (source_name, original_url, normalized_url, original_title, original_summary,
          content_hash, image_url, local_image_path, local_video_path,
          media_type, uzbek_content, status, created_at, video_width, video_height)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
         """,
         (
             source_name,
             original_url,
+            normalized,
             original_title,
             original_summary,
             content_hash,
@@ -441,5 +469,13 @@ def reject_all_pending(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         "UPDATE articles SET status = 'rejected' WHERE status = 'pending'"
     )
+    conn.commit()
+    return cursor.rowcount
+
+
+def cleanup_old_seen_urls(conn: sqlite3.Connection, max_age_days: int = 90) -> int:
+    """Remove old entries from seen_urls to prevent unbounded table growth."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    cursor = conn.execute("DELETE FROM seen_urls WHERE created_at < ?", (cutoff,))
     conn.commit()
     return cursor.rowcount
