@@ -33,3 +33,4 @@ deploy.sh
 
 # Ruff cache
 .ruff_cache/
+.venv/
