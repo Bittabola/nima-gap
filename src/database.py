@@ -148,11 +148,6 @@ def init_database(db_path: str) -> sqlite3.Connection:
         ON articles(content_hash)
     """)
 
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_articles_normalized_url
-        ON articles(normalized_url)
-    """)
-
     # Table to track all seen URLs (including skipped/failed)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS seen_urls (
@@ -225,6 +220,12 @@ def init_database(db_path: str) -> sqlite3.Connection:
                 "UPDATE articles SET normalized_url = ? WHERE id = ?",
                 (normalize_url(row["original_url"]), row["id"]),
             )
+
+    # Create index on normalized_url (after migration ensures column exists)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_articles_normalized_url
+        ON articles(normalized_url)
+    """)
 
     conn.commit()
     return conn
