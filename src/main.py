@@ -400,8 +400,10 @@ async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, a
     bot = app.bot
 
     remaining_interval = 300  # 5 minutes if there are remaining articles
+    refetch_interval = 10800  # 3 hours - periodic retry when queue stays empty
     cleanup_interval = 86400  # 24 hours
     last_remaining_check = 0
+    last_fetch_time = 0
     last_heartbeat = 0
     last_cleanup = 0
     has_remaining = False
@@ -418,6 +420,7 @@ async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, a
         )
         has_remaining = remaining > 0
         last_remaining_check = asyncio.get_running_loop().time()
+        last_fetch_time = last_remaining_check
 
     while True:
         try:
@@ -440,6 +443,7 @@ async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, a
                     )
                     has_remaining = remaining > 0
                     last_remaining_check = current_time
+                    last_fetch_time = current_time
                     was_pending = False
 
             # Fetch immediately when queue becomes empty
@@ -450,6 +454,7 @@ async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, a
                 )
                 has_remaining = remaining > 0
                 last_remaining_check = current_time
+                last_fetch_time = current_time
                 was_pending = False
 
             # If we have remaining articles from hitting limit, check every 5 min
@@ -461,6 +466,17 @@ async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, a
                     )
                     has_remaining = remaining > 0
                     last_remaining_check = current_time
+                    last_fetch_time = current_time
+
+            # Periodic re-fetch when queue is empty and no other trigger fired
+            elif queue_empty and current_time - last_fetch_time >= refetch_interval:
+                logger.info("Periodic re-fetch: queue empty, checking for new content...")
+                remaining = await fetch_job(
+                    config, db_conn, db_lock, http_client, gemini_client, bot
+                )
+                has_remaining = remaining > 0
+                last_remaining_check = current_time
+                last_fetch_time = current_time
 
             # Update pending state for next iteration
             was_pending = not queue_empty
