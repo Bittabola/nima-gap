@@ -1,3 +1,5 @@
+name: Deploy
+
 on:
   push:
     branches: [main]
@@ -9,11 +11,14 @@ env:
 jobs:
   deploy:
     runs-on: docker
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     container:
       image: docker:cli
     steps:
       - name: Install dependencies
-        run: apk add --no-cache git openssh-client
+        run: apk add --no-cache git openssh-client curl jq
 
       - name: Checkout
         env:
@@ -24,20 +29,58 @@ jobs:
 
       - name: Build and push
         run: |
-          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u ${{ github.actor }} --password-stdin
-          docker build -f docker/Dockerfile -t "$IMAGE" .
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          IMAGE_SHA="${REGISTRY}/${GITHUB_REPOSITORY}:sha-${SHORT_SHA}"
+          echo "${{ secrets.REGISTRY_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          docker build -f docker/Dockerfile -t "$IMAGE" -t "$IMAGE_SHA" .
           docker push "$IMAGE"
+          docker push "$IMAGE_SHA"
 
       - name: Deploy to VPS
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_DIR: "nima-gap"
         run: |
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
           mkdir -p ~/.ssh
           echo "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "${VPS_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
-          ssh -o StrictHostKeyChecking=yes -i ~/.ssh/deploy_key "${DEPLOY_USER}@${VPS_HOST}" \
-            "bash -c 'docker pull ${IMAGE} && cd ~/docker/${REPO_NAME} && docker compose up -d'"
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key "${DEPLOY_USER}@${VPS_HOST}" \
+            "bash -c 'docker pull ${IMAGE} && cd ~/docker/${DEPLOY_DIR} && docker compose up -d'"
+
+      - name: Verify deployment
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          CONTAINER_NAME: "nima-gap"
+        run: |
+          sleep 10
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key "${DEPLOY_USER}@${VPS_HOST}" \
+            "bash -c 'for i in 1 2 3 4 5; do \
+              STATUS=\$(docker ps --filter name=${CONTAINER_NAME} --format \"{{.Status}}\"); \
+              echo \"\$STATUS\" | grep -q Up && echo \"Container is running\" && exit 0; \
+              echo \"Attempt \$i: container not up, retrying in 10s...\"; sleep 10; \
+            done; echo \"Container failed to start\"; exit 1'"
+
+      - name: Notify deploy succeeded
+        if: success()
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="*Deployed* -- \`${REPO_NAME}\` (\`sha-${SHORT_SHA}\`)
+          [View commit](https://git.fayzullaev.ca/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})"
+
+      - name: Notify deploy failed
+        if: failure()
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="*Deploy FAILED* -- \`${REPO_NAME}\`
+          [View run](https://git.fayzullaev.ca/${GITHUB_REPOSITORY}/actions)"

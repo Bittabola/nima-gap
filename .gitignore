@@ -23,13 +23,15 @@ data/
 Thumbs.db
 
 # Local docs
-AGENTS.md
 subtitles-plan.md
 olamda-nima-gap-plan.md
 deploy.sh
 
 # AI assistant configs
 .claude/
+
+# Worktrees
+.worktrees/
 
 # Ruff cache
 .ruff_cache/

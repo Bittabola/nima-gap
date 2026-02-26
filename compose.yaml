@@ -1,7 +1,7 @@
 services:
   bot:
-    image: olamda_nima_gap
-    container_name: olamda_nima_gap
+    image: git.fayzullaev.ca/bittabola/nima-gap:latest
+    container_name: nima-gap
     restart: unless-stopped
     env_file:
       - ${DEPLOY_DIR:-.}/.env
@@ -10,3 +10,9 @@ services:
       - ${DEPLOY_DIR:-.}/config:/app/config:ro
     environment:
       - TZ=Asia/Tashkent
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'src.main' > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

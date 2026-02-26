@@ -1,0 +1,226 @@
+name: Auto PR Review
+
+on:
+  push:
+    branches-ignore: [main]
+
+env:
+  FORGEJO_URL: ${{ github.server_url }}/api/v1
+  REPO: ${{ github.repository }}
+
+jobs:
+  review:
+    runs-on: docker
+    container:
+      image: python:3.12-slim
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bash git curl jq ca-certificates gnupg
+
+      - name: Install Node.js 20
+        run: |
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+            | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+            > /etc/apt/sources.list.d/nodesource.list
+          apt-get update
+          apt-get install -y --no-install-recommends nodejs
+
+      - name: Install Claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Checkout repository
+        shell: bash
+        env:
+          AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          REGISTRY="${GITHUB_SERVER_URL#https://}"
+          git clone --branch "$GITHUB_REF_NAME" \
+            "https://oauth2:${AUTO_MERGE_TOKEN}@${REGISTRY}/${GITHUB_REPOSITORY}.git" .
+          git fetch origin main
+
+      - name: Install Python dependencies
+        run: |
+          pip install --no-cache-dir -r requirements.txt ruff
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+      - name: Create or find PR
+        id: pr
+        shell: bash
+        env:
+          AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+        run: |
+          BRANCH="$GITHUB_REF_NAME"
+          PR_NUMBER=$(curl -s \
+            -H "Authorization: token ${AUTO_MERGE_TOKEN}" \
+            "${FORGEJO_URL}/repos/${REPO}/pulls?state=open&head=${REPO%%/*}:${BRANCH}" \
+            | jq '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            PR_NUMBER=$(curl -s -X POST \
+              -H "Authorization: token ${AUTO_MERGE_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg title "Auto: ${BRANCH}" \
+                --arg head "$BRANCH" \
+                --arg base "main" \
+                --arg body "Automated PR for branch \`${BRANCH}\`." \
+                '{title: $title, head: $head, base: $base, body: $body}')" \
+              "${FORGEJO_URL}/repos/${REPO}/pulls" \
+              | jq '.number')
+          fi
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+            echo "ERROR: Failed to get or create PR"
+            exit 1
+          fi
+          echo "PR_NUMBER=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "BRANCH=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare review
+        run: |
+          git diff origin/main...HEAD > /tmp/diff.txt
+          useradd -m -s /bin/bash reviewer
+          cp -r /root/.npm /home/reviewer/.npm 2>/dev/null || true
+          chown -R reviewer:reviewer /home/reviewer
+          chown -R reviewer:reviewer . /tmp/diff.txt
+
+      - name: Claude review
+        id: claude
+        shell: bash
+        run: |
+          REVIEW_SCHEMA='{"type":"object","properties":{"verdict":{"type":"string","enum":["APPROVED","CHANGES_REQUESTED"]},"summary":{"type":"string"},"issues":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["critical","warning","suggestion"]},"file":{"type":"string"},"description":{"type":"string"}},"required":["severity","description"]}}},"required":["verdict","summary","issues"]}'
+          DIFF=$(cat /tmp/diff.txt)
+          REVIEW_PROMPT="You are a senior code reviewer. Review the following git diff for a Python/Telegram bot application (Uzbek feel-good stories bot using Gemini AI, feedparser, yt-dlp).
+
+          Focus on:
+          - Bugs, logic errors, security issues (critical)
+          - Performance problems, bad practices (warning)
+          - Style improvements, minor suggestions (suggestion)
+
+          Be pragmatic. Only request changes for critical or warning-level issues.
+          If the diff is clean, approve it.
+
+          Here is the diff:
+
+          ${DIFF}"
+
+          RESULT=$(runuser -u reviewer -- claude -p \
+            --model opus \
+            --output-format json \
+            --json-schema "$REVIEW_SCHEMA" \
+            --max-turns 6 \
+            --allowedTools "Read,Grep,Glob" \
+            --dangerously-skip-permissions \
+            --no-session-persistence \
+            "$REVIEW_PROMPT")
+
+          STRUCTURED=$(echo "$RESULT" | jq -r '.structured_output // empty')
+          if [ -z "$STRUCTURED" ] || [ "$STRUCTURED" = "null" ]; then
+            echo "ERROR: Claude returned no structured output. Raw result:"
+            echo "$RESULT"
+            exit 1
+          fi
+
+          VERDICT=$(echo "$STRUCTURED" | jq -r '.verdict // empty')
+          if [ -z "$VERDICT" ]; then
+            echo "ERROR: No verdict in structured output"
+            exit 1
+          fi
+
+          SUMMARY=$(echo "$STRUCTURED" | jq -r '.summary // ""')
+
+          echo "VERDICT=${VERDICT}" >> "$GITHUB_OUTPUT"
+
+          {
+            if [ "$VERDICT" = "APPROVED" ]; then
+              printf '## Approved\n\n'
+            else
+              printf '## Changes Requested\n\n'
+            fi
+            printf '%s\n\n' "$SUMMARY"
+
+            for severity in critical warning suggestion; do
+              COUNT=$(echo "$STRUCTURED" | jq -r "[.issues[] | select(.severity==\"${severity}\")] | length")
+              if [ "$COUNT" -gt 0 ]; then
+                case "$severity" in
+                  critical)   printf '### Critical\n' ;;
+                  warning)    printf '### Warnings\n' ;;
+                  suggestion) printf '### Suggestions\n' ;;
+                esac
+                while IFS= read -r issue; do
+                  FILE=$(echo "$issue" | jq -r '.file // "general"')
+                  DESC=$(echo "$issue" | jq -r '.description')
+                  printf -- '- **%s**: %s\n' "$FILE" "$DESC"
+                done < <(echo "$STRUCTURED" | jq -c ".issues[] | select(.severity==\"${severity}\")")
+                printf '\n'
+              fi
+            done
+          } > /tmp/pr_comment.txt
+
+      - name: Post PR comment
+        shell: bash
+        env:
+          AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.PR_NUMBER }}
+        run: |
+          PAYLOAD=$(jq -n --rawfile body /tmp/pr_comment.txt '{body: $body}')
+          HTTP_CODE=$(curl -s -o /tmp/comment_resp.txt -w '%{http_code}' -X POST \
+            -H "Authorization: token ${AUTO_MERGE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "${FORGEJO_URL}/repos/${REPO}/issues/${PR_NUMBER}/comments")
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "ERROR: Failed to post PR comment (HTTP ${HTTP_CODE})"
+            cat /tmp/comment_resp.txt
+            exit 1
+          fi
+          echo "PR comment posted successfully"
+
+      - name: Merge PR (if approved)
+        shell: bash
+        if: steps.claude.outputs.VERDICT == 'APPROVED'
+        env:
+          AUTO_MERGE_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.PR_NUMBER }}
+        run: |
+          HTTP_CODE=$(curl -s -o /tmp/merge_resp.txt -w '%{http_code}' -X POST \
+            -H "Authorization: token ${AUTO_MERGE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"Do":"squash","delete_branch_after_merge":true}' \
+            "${FORGEJO_URL}/repos/${REPO}/pulls/${PR_NUMBER}/merge")
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Failed to merge PR (HTTP ${HTTP_CODE})"
+            cat /tmp/merge_resp.txt
+            exit 1
+          fi
+          echo "PR merged successfully"
+
+      - name: Notify on rejection
+        shell: bash
+        if: steps.claude.outputs.VERDICT == 'CHANGES_REQUESTED'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.PR_NUMBER }}
+          BRANCH: ${{ steps.pr.outputs.BRANCH }}
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          TEXT=$(printf '*Changes requested* -- `%s` PR #%s\nBranch: `%s`\n[View PR](https://git.fayzullaev.ca/%s/pulls/%s)' \
+            "$REPO_NAME" "$PR_NUMBER" "$BRANCH" "$GITHUB_REPOSITORY" "$PR_NUMBER")
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg chat_id "$TELEGRAM_CHAT_ID" \
+              --arg text "$TEXT" \
+              '{chat_id: $chat_id, text: $text, parse_mode: "Markdown"}')"
+          exit 1
