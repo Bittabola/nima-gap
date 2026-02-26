@@ -90,18 +90,8 @@ jobs:
       - name: Prepare review
         run: |
           git diff origin/main...HEAD > /tmp/diff.txt
-          useradd -m -s /bin/bash reviewer
-          cp -r /root/.npm /home/reviewer/.npm 2>/dev/null || true
-          chown -R reviewer:reviewer /home/reviewer
-          chown -R reviewer:reviewer . /tmp/diff.txt
-
-      - name: Claude review
-        id: claude
-        shell: bash
-        run: |
-          REVIEW_SCHEMA='{"type":"object","properties":{"verdict":{"type":"string","enum":["APPROVED","CHANGES_REQUESTED"]},"summary":{"type":"string"},"issues":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["critical","warning","suggestion"]},"file":{"type":"string"},"description":{"type":"string"}},"required":["severity","description"]}}},"required":["verdict","summary","issues"]}'
-          DIFF=$(cat /tmp/diff.txt)
-          REVIEW_PROMPT="You are a senior code reviewer. Review the following git diff for a Python/Telegram bot application (Uzbek feel-good stories bot using Gemini AI, feedparser, yt-dlp).
+          cat > /tmp/review_prompt.txt << 'PROMPT_EOF'
+          You are a senior code reviewer. Review the following git diff for a Python/Telegram bot application (Uzbek feel-good stories bot using Gemini AI, feedparser, yt-dlp).
 
           Focus on:
           - Bugs, logic errors, security issues (critical)
@@ -112,18 +102,27 @@ jobs:
           If the diff is clean, approve it.
 
           Here is the diff:
+          PROMPT_EOF
+          cat /tmp/diff.txt >> /tmp/review_prompt.txt
+          useradd -m -s /bin/bash reviewer
+          cp -r /root/.npm /home/reviewer/.npm 2>/dev/null || true
+          chown -R reviewer:reviewer /home/reviewer
+          chown -R reviewer:reviewer . /tmp/review_prompt.txt
 
-          ${DIFF}"
+      - name: Claude review
+        id: claude
+        shell: bash
+        run: |
+          REVIEW_SCHEMA='{"type":"object","properties":{"verdict":{"type":"string","enum":["APPROVED","CHANGES_REQUESTED"]},"summary":{"type":"string"},"issues":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["critical","warning","suggestion"]},"file":{"type":"string"},"description":{"type":"string"}},"required":["severity","description"]}}},"required":["verdict","summary","issues"]}'
 
-          RESULT=$(runuser -u reviewer -- claude -p \
+          RESULT=$(cat /tmp/review_prompt.txt | runuser -u reviewer -- claude -p \
             --model opus \
             --output-format json \
             --json-schema "$REVIEW_SCHEMA" \
             --max-turns 6 \
             --allowedTools "Read,Grep,Glob" \
             --dangerously-skip-permissions \
-            --no-session-persistence \
-            "$REVIEW_PROMPT")
+            --no-session-persistence)
 
           STRUCTURED=$(echo "$RESULT" | jq -r '.structured_output // empty')
           if [ -z "$STRUCTURED" ] || [ "$STRUCTURED" = "null" ]; then
