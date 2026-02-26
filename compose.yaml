@@ -11,7 +11,7 @@ services:
     environment:
       - TZ=Asia/Tashkent
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'src.main' > /dev/null"]
+      test: ["CMD-SHELL", "python -c \"import os; os.kill(1, 0)\""]
       interval: 30s
       timeout: 10s
       retries: 3
