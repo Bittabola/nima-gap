@@ -33,6 +33,18 @@
 - Never push directly to `main` — create a feature branch; the auto-pr-merge workflow handles review and merge.
 - Run `ruff check .` and `pytest tests/ -v` locally before pushing.
 
+## Branch Workflow
+1. Create a feature branch: `git checkout -b fix/my-change`
+2. Make changes, commit, push: `git push -u origin fix/my-change`
+3. The auto-pr-merge workflow automatically creates a PR, runs CI, and squash-merges if approved.
+4. After merge, clean up locally:
+   ```
+   git checkout main
+   git pull
+   git branch -D <branch-name>
+   ```
+   Use `-D` (uppercase) because squash-merges aren't recognized by `git branch -d`.
+
 ## Security & Configuration Tips
 - Do not commit `.env`; use `.env.example` as the template.
 - Required env vars: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `TELEGRAM_ADMIN_ID`, `GEMINI_API_KEY`.
