@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 # Telegram limits
 TELEGRAM_VIDEO_MAX_SIZE = 50 * 1024 * 1024  # 50 MB for send_video
+
+# Gemini inline upload limit
+GEMINI_VIDEO_MAX_SIZE = 20 * 1024 * 1024  # 20 MB
 
 # Supported image types
 VALID_CONTENT_TYPES = {
@@ -262,8 +266,6 @@ class VideoResult:
 
 async def get_video_dimensions(video_path: str) -> tuple[Optional[int], Optional[int]]:
     """Get video width and height using ffprobe."""
-    import json as json_module
-
     try:
         cmd = [
             "ffprobe",
@@ -284,7 +286,7 @@ async def get_video_dimensions(video_path: str) -> tuple[Optional[int], Optional
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
 
         if proc.returncode == 0:
-            data = json_module.loads(stdout.decode())
+            data = json.loads(stdout.decode())
             if data.get("streams"):
                 stream = data["streams"][0]
                 return stream.get("width"), stream.get("height")
@@ -299,6 +301,140 @@ def get_videos_dir(data_dir: str = "data") -> Path:
     videos_dir = Path(data_dir) / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
     return videos_dir
+
+
+def get_tmp_dir(data_dir: str = "data") -> Path:
+    """Get or create the tmp directory for transient files."""
+    tmp_dir = Path(data_dir) / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    return tmp_dir
+
+
+async def _get_video_duration(video_path: str) -> Optional[float]:
+    """Get video duration in seconds using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            video_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+
+        if proc.returncode == 0:
+            data = json.loads(stdout.decode())
+            duration_str = data.get("format", {}).get("duration")
+            if duration_str:
+                return float(duration_str)
+    except Exception as e:
+        logger.warning(f"Failed to get video duration: {e}")
+
+    return None
+
+
+async def compress_video_for_gemini(
+    video_path: str,
+    max_size: int = GEMINI_VIDEO_MAX_SIZE,
+    data_dir: str = "data",
+) -> Optional[str]:
+    """
+    Compress a video to fit within Gemini's inline upload limit.
+    Returns path to compressed file, or original path if already small enough.
+    Returns None on failure. Caller is responsible for cleaning up temp files.
+    """
+    import os
+
+    file_size = os.path.getsize(video_path)
+    if file_size <= max_size:
+        return video_path
+
+    duration = await _get_video_duration(video_path)
+    if not duration or duration <= 0:
+        logger.warning(f"Cannot compress video without duration: {video_path}")
+        return None
+
+    # Target bitrate: leave 10% margin, split 90% video / 10% audio
+    target_total_bitrate = int((max_size * 8 * 0.9) / duration)  # bits/sec
+    video_bitrate = max(target_total_bitrate - 96_000, 100_000)  # at least 100kbps
+
+    url_hash = hashlib.sha256(video_path.encode()).hexdigest()[:16]
+    tmp_dir = get_tmp_dir(data_dir)
+    out_path = tmp_dir / f"{url_hash}_gemini.mp4"
+
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-c:v",
+            "libx264",
+            "-crf",
+            "28",
+            "-b:v",
+            str(video_bitrate),
+            "-maxrate",
+            str(video_bitrate),
+            "-bufsize",
+            str(video_bitrate * 2),
+            "-vf",
+            "scale='min(640,iw)':'min(640,ih)':force_original_aspect_ratio=decrease",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-movflags",
+            "+faststart",
+            str(out_path),
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+        if proc.returncode != 0:
+            logger.warning(
+                f"ffmpeg compression failed: {stderr.decode()[:200]}"
+            )
+            if out_path.exists():
+                out_path.unlink()
+            return None
+
+        compressed_size = out_path.stat().st_size
+        if compressed_size > max_size:
+            logger.warning(
+                f"Compressed video still too large: {compressed_size / 1024 / 1024:.1f} MB"
+            )
+            out_path.unlink()
+            return None
+
+        logger.info(
+            f"Compressed video for Gemini: {file_size / 1024 / 1024:.1f} MB -> "
+            f"{compressed_size / 1024 / 1024:.1f} MB"
+        )
+        return str(out_path)
+
+    except asyncio.TimeoutError:
+        logger.warning("Video compression timed out")
+        if out_path.exists():
+            out_path.unlink()
+        return None
+    except Exception as e:
+        logger.warning(f"Video compression failed: {e}")
+        if out_path.exists():
+            out_path.unlink()
+        return None
 
 
 def generate_video_filename(url: str) -> str:

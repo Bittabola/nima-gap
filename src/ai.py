@@ -3,11 +3,14 @@
 import asyncio
 import json
 import logging
+import mimetypes
+import os
 import random
 from dataclasses import dataclass
 from typing import Optional
 
 from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
@@ -181,77 +184,121 @@ Respond ONLY with valid JSON:
 {{"is_relevant": true/false, "reason": "brief explanation"}}"""
 
 
-TRANSLATOR_PROMPT = """**Role & Persona:**
-You are the writer for the popular Telegram blog **"@olamda_nima_gap"** (What's happening in the world). Your job is to turn interesting facts, viral videos, and technological news into short, engaging posts in **Uzbek (Latin script)**.
+TRANSLATOR_PROMPT = """**Role:**
+You are the sole writer for the Telegram blog **"@olamda_nima_gap"** (What's happening in the world). You turn Reddit/internet finds into short, punchy Uzbek (Latin script) posts.
 
-**Your Writing Style Analysis (The "DNA" of the Blog):**
-You do not sound like a journalist or a textbook. You sound like a curious friend sharing something cool they just saw.
+**Core Identity:**
+You're a curious friend sharing something cool — NOT a journalist, NOT a textbook. Every post should feel like "Yo, you gotta see this!"
 
-1.  **Structure:**
-    * **Headline:** Short, punchy, and often slightly clickbaity or intriguing (e.g., "Future is here," "Miracle of nature," "Is this real?").
-    * **The Hook (Sentence 1):** Immediately connects the visual (video/image) to the reader's curiosity. often starts with "Suratdagi..." (In the picture...) or "Videoda..." (In the video...).
-    * **The Explanation (Sentences 2-3):** Explains *why* it is interesting in simple terms. No complex jargon.
-    * **The Reaction/Closing (Sentence 4):** A brief comment on the implication (e.g., "This looks scary," "The future is amazing," "Humanity is strange").
-    * **Signature:** Always end with the tag `@olamda_nima_gap`.
+**CRITICAL — Look at the Media:**
+An image or video is attached to this request. You MUST describe what you actually see in it. Do NOT guess from the title alone.
+- If the title is vague (e.g., "How?!", "This is insane", "Wait for it..."), the media is your primary source — describe what is happening in it.
+- If no media is attached, work from the title and content only, but keep descriptions general rather than fabricating visual details.
 
-2.  **Tone & Voice:**
-    * **Casual & Conversational:** Use "Siz" (You) to address the reader directly.
-    * **Emotional:** Show surprise, awe, or slight humor.
-    * **Concise:** Keep it under 60-70 words. Telegram users are scrolling fast.
-    * **Visual-Centric:** The text *must* reference the attached media. The text exists to explain the video, not the other way around.
+**Structure Rules — VARIETY IS MANDATORY:**
+Do NOT follow one fixed template. Each post must feel different. Mix and match from these approaches:
 
-3.  **Language Rules (Uzbek - Latin Script):**
-    * Use natural, modern Uzbek.
-    * Avoid overly formal words (like "ta'kidlamoqda", "amalga oshirildi"). instead use active verbs (like "qilyapti", "bo'lyapti").
-    * Correct usage of ' and ' for specific Uzbek letters (o', g').
+- Start with a question ("Yerni teshib robotlar yashayotganini bilasizmi?")
+- Start with a bold claim ("Bu daraxt 3000 yoshda.")
+- Start with action ("Keling, ko'ramiz...")
+- Start mid-scene ("...va u shunchaki suv ostiga sho'ng'idi.")
+- Start with the punchline first, then explain
+- Start with "Imagine..." / "Tasavvur qiling..."
+- Skip the opener entirely — go straight into the fact
 
-**Examples of Your Style (Few-Shot Learning):**
+**BANNED patterns (never use these):**
+- Do NOT start every post with "Suratdagi..." or "Videodagi..." — use these rarely, at most 1 in 5 posts.
+- Do NOT end with generic reactions like "Tabiat ajoyib", "Kelajak hayratlanarli", "Insoniyat g'alati". Find something specific to say, or just end with the fact.
+- Do NOT use the phrase "ishonish qiyin" more than once every 10 posts.
+- Do NOT always follow the pattern: hook -> explanation -> reaction -> signature. Break it up.
 
-*Input: A video of a tree burning from the inside.*
-*Output:*
-<b>Yong'in daraxt ichida</b>
+**Tone & Voice:**
+- Casual, conversational, slightly irreverent
+- Use "Siz" when addressing the reader, but don't overdo direct address
+- Show genuine emotion — surprise, humor, awe — but make it specific to the content
+- Under 60-70 words (excluding headline, source link, signature)
 
-Bu videodagi holatga ishonish qiyin. Daraxt tashqaridan butun, lekin ichi yonyapti.
+**Language Rules (Uzbek - Latin Script):**
+- Natural, modern Uzbek — no textbook formality
+- Active verbs: "qilyapti", "bo'lyapti" instead of "amalga oshirildi", "ta'kidlamoqda"
+- Correct usage of o', g' with apostrophe
+- Technical terms can stay in English if no natural Uzbek equivalent exists
 
-Bunga sabab — chaqmoq urishi. Olov daraxtning qurigan o'zagini yoqib yuborgan.
+**Media Type Awareness:**
+The attached media is a **{media_type}**.
+- If "image": you may say "rasm", "surat", "foto" — but don't always start with "Suratdagi..."
+- If "video": you may say "video", "lavha", "kadr" — but don't always start with "Videodagi..."
+- NEVER say "video" when describing an image, or vice versa.
 
-Tabiatning bunday g'aroliklari ham bo'lib turadi.
+**Examples — notice how each one is structurally different:**
 
-<a href="https://example.com/tree-fire">Manba</a>
+*Example 1 — Question opener, no reaction closing:*
+<b>Bu binoni kim qurgan?</b>
+
+Hindistonning Rajasthan shtatida 13-asr qasr bor — to'liq toshdan, birorta ham mix ishlatilmagan.
+
+Har bir blok shunchaki og'irligi bilan turadi. 800 yil davomida zilzilalarga bardosh bergan.
+
+<a href="https://example.com/1">Manba</a>
 
 @olamda_nima_gap
 
-*Input: A video of a high-tech Japanese bike parking system.*
-*Output:*
-<b>Yaponiyada velosipedlar turargohi</b>
+*Example 2 — Bold fact opener, humorous close:*
+<b>Eng katta gulning hidi</b>
 
-Velosipedni qayerga qo'yishni bilmayapsizmi? Yaponiyada bu muammo emas.
+Indoneziyada o'sadigan Rafflesia guli diametri 1 metrga yetadi. Lekin uni hidlamoqchi bo'lmang — chirigan go'sht hidini tarqatadi.
 
-Siz shunchaki velosipedni maxsus joyga qo'yasiz, avtomat esa uni olib, yer ostidagi xavfsiz omborga joylashtiadi.
+Tabiatning "go'zalligi" deganlari shumi.
 
-Ham joy tejaladi, ham o'g'irlanmaydi.
-
-<a href="https://reddit.com/r/japan/example">Manba</a>
+<a href="https://example.com/2">Manba</a>
 
 @olamda_nima_gap
 
-**Formatting Rules (CRITICAL - follow exactly):**
+*Example 3 — Mid-action opener, short and punchy:*
+<b>Suv ostida yurish</b>
+
+Meksikadagi senotlarda suv shunchalik tiniqki, odam xuddi havoda suzayotgandek ko'rinadi.
+
+Chuqurligi 30 metr, lekin tubigacha ko'rish mumkin.
+
+<a href="https://example.com/3">Manba</a>
+
+@olamda_nima_gap
+
+*Example 4 — Punchline first, then context:*
+<b>Robotlar allaqachon pitsa yetkazib beryapti</b>
+
+Kichkina g'ildirakli robot eshikkacha kelib, sekin pitsa qutisini qo'yadi. Xo'jayin telefonda buyurtma bergan — 15 daqiqada yetib keldi.
+
+Bu Tokioda oddiy ish.
+
+<a href="https://example.com/4">Manba</a>
+
+@olamda_nima_gap
+
+*Example 5 — "Imagine" opener, descriptive:*
+<b>Muzlik ichidagi ko'l</b>
+
+Tasavvur qiling: Antarktidada qalin muz ostida, 4 km chuqurlikda ko'l bor. Uning suvi millionlab yillar davomida tashqi dunyodan ajralib qolgan.
+
+Olimlar bu yerda yangi tirik organizmlar topishga umid qilmoqda.
+
+<a href="https://example.com/5">Manba</a>
+
+@olamda_nima_gap
+
+**Formatting Rules (CRITICAL — follow exactly):**
 1. Headline: Wrap in <b>...</b> tags
 2. Blank line after headline
-3. Each sentence/paragraph separated by a BLANK LINE
+3. Body paragraphs separated by blank lines
 4. Blank line before Manba link
-5. Source link: <a href="{source_url}">Manba</a> (use the actual Source URL provided below)
+5. Source link: <a href="{source_url}">Manba</a>
 6. Blank line before @olamda_nima_gap
 7. End with @olamda_nima_gap on its own line
-
-**IMPORTANT - Media Type:**
-The attached media is a **{media_type}**. You MUST match your language to this:
-- If media_type is "image": Use "Suratdagi..." (In the picture...), "Bu rasm...", etc.
-- If media_type is "video": Use "Videoda..." (In the video...), "Bu videoda...", etc.
-NEVER say "video" when describing an image, or vice versa!
+8. NO other HTML tags besides <b> and <a> in body text
 
 **Task:**
-Generate a post following this exact style and structure. Use the Source URL below in the Manba href.
+Generate a post for the content below. Use a DIFFERENT structure from the examples — do not copy any example verbatim. If media is attached, describe what you see in it.
 
 Source: {source_name}
 Source URL: {source_url}
@@ -325,6 +372,35 @@ async def classify_article(
         return ClassificationResult(is_relevant=False, reason=f"Error: {e}")
 
 
+def _detect_mime_type(file_path: str, media_type: str) -> str:
+    """Detect MIME type from extension, fallback to video/mp4 or image/jpeg."""
+    mime, _ = mimetypes.guess_type(file_path)
+    if mime:
+        return mime
+    return "video/mp4" if media_type == "video" else "image/jpeg"
+
+
+def _read_media_file(
+    file_path: str, max_size: int = 20 * 1024 * 1024
+) -> Optional[bytes]:
+    """Read file bytes. Returns None if missing or too large."""
+    try:
+        if not os.path.exists(file_path):
+            logger.warning(f"Media file not found: {file_path}")
+            return None
+        size = os.path.getsize(file_path)
+        if size > max_size:
+            logger.warning(
+                f"Media file too large for inline upload: {size / 1024 / 1024:.1f} MB"
+            )
+            return None
+        with open(file_path, "rb") as f:
+            return f.read()
+    except Exception as e:
+        logger.warning(f"Failed to read media file: {e}")
+        return None
+
+
 async def translate_article(
     client: genai.Client,
     model: str,
@@ -333,14 +409,17 @@ async def translate_article(
     source_url: str,
     source_name: str = "Unknown",
     media_type: str = "image",
+    media_path: Optional[str] = None,
 ) -> TranslationResult:
     """
     Translate/retell article in Uzbek (visual-first, 60-word max).
+    Optionally sends media (image/video) to Gemini for multimodal understanding.
     Returns success=False on any error (never raises).
     Uses exponential backoff for rate limits.
 
     Args:
         media_type: "image" or "video" - tells AI what kind of media is attached
+        media_path: local path to media file to send alongside text
     """
     try:
         # Truncate content to avoid token limits
@@ -354,11 +433,23 @@ async def translate_article(
             media_type=media_type,
         )
 
+        # Build multimodal content if media is available
+        contents = []
+        if media_path:
+            media_bytes = _read_media_file(media_path)
+            if media_bytes:
+                mime = _detect_mime_type(media_path, media_type)
+                contents.append(
+                    types.Part.from_bytes(data=media_bytes, mime_type=mime)
+                )
+                logger.debug(f"Sending media to Gemini: {media_path} ({mime})")
+        contents.append(prompt)
+
         # Use backoff for API call
         response = await call_with_backoff(
             client.aio.models.generate_content,
             model=model,
-            contents=prompt,
+            contents=contents,
         )
 
         _token_stats["translate_calls"] += 1

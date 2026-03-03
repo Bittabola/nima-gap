@@ -42,6 +42,7 @@ from .fetcher import FetchedArticle, create_http_client, fetch_source
 from .media import (
     cleanup_old_images,
     cleanup_old_videos,
+    compress_video_for_gemini,
     download_image,
     download_video,
 )
@@ -204,33 +205,13 @@ async def fetch_job(
                 skipped_irrelevant += 1
                 continue
 
-            # Translate (with source name and media type for attribution)
-            translation = await translate_article(
-                gemini_client,
-                config.gemini_model,
-                article.title,
-                article.content,
-                article.url,
-                source_name=source_name,
-                media_type=article.media_type,
-            )
-
-            if not translation.success:
-                logger.warning(
-                    f"Translation failed for {article.url}: {translation.error}"
-                )
-                async with db_lock:
-                    mark_url_seen(
-                        db_conn, article.url, content_hash, "failed", translation.error
-                    )
-                failed += 1
-                continue
-
-            # Download and cache media
+            # Download and cache media (before translation for multimodal)
             local_image_path = None
             local_video_path = None
             video_width = None
             video_height = None
+            gemini_media_path = None  # Path to send to Gemini (may be compressed)
+            compressed_tmp_path = None  # Track temp file for cleanup
 
             if article.media_type == "video" and article.image_url:
                 # For Reddit videos, use the post URL (yt-dlp handles it better)
@@ -258,6 +239,15 @@ async def fetch_job(
                         logger.info(
                             f"Video verified: {video_url} -> {local_video_path} ({video_file_size} bytes)"
                         )
+                        # Compress for Gemini if needed
+                        compressed = await compress_video_for_gemini(
+                            local_video_path,
+                            data_dir=config.data_dir,
+                        )
+                        if compressed:
+                            gemini_media_path = compressed
+                            if compressed != local_video_path:
+                                compressed_tmp_path = compressed
                     else:
                         logger.warning(
                             f"Video file empty or missing after download: {video_result.local_path}"
@@ -295,11 +285,43 @@ async def fetch_job(
                 )
                 if image_result.success:
                     local_image_path = image_result.local_path
+                    gemini_media_path = image_result.local_path
                     logger.debug(
                         f"Cached image: {article.image_url} -> {local_image_path}"
                     )
                 else:
                     logger.warning(f"Image download failed: {image_result.error}")
+
+            # Translate (with source name, media type, and media for multimodal)
+            try:
+                translation = await translate_article(
+                    gemini_client,
+                    config.gemini_model,
+                    article.title,
+                    article.content,
+                    article.url,
+                    source_name=source_name,
+                    media_type=article.media_type,
+                    media_path=gemini_media_path,
+                )
+            finally:
+                # Clean up compressed temp file
+                if compressed_tmp_path:
+                    try:
+                        os.remove(compressed_tmp_path)
+                    except OSError:
+                        pass
+
+            if not translation.success:
+                logger.warning(
+                    f"Translation failed for {article.url}: {translation.error}"
+                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn, article.url, content_hash, "failed", translation.error
+                    )
+                failed += 1
+                continue
 
             # Save to database
             async with db_lock:
