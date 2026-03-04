@@ -76,6 +76,16 @@ def _interleave_sources(
     return all_articles
 
 
+def _cleanup_media(*paths: str | None) -> None:
+    """Remove downloaded media files (best-effort)."""
+    for path in paths:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 async def _process_article(
     config,
     db_conn,
@@ -162,30 +172,7 @@ async def _process_article(
             )
         return "irrelevant"
 
-    # Classify content
-    classification = await classify_article(
-        gemini_client,
-        config.gemini_model,
-        article.title,
-        article.content,
-        media_url=article.image_url,
-        source_type=article.source_type,
-    )
-
-    if not classification.is_relevant:
-        logger.debug(f"Skipped: {article.title[:50]} - {classification.reason}")
-        async with db_lock:
-            mark_url_seen(
-                db_conn,
-                article.url,
-                content_hash,
-                "irrelevant",
-                classification.reason,
-                normalized=normalized,
-            )
-        return "irrelevant"
-
-    # Download and cache media (before translation for multimodal)
+    # Download and cache media (before classification for multimodal)
     local_image_path = None
     local_video_path = None
     video_width = None
@@ -255,7 +242,44 @@ async def _process_article(
             gemini_media_path = image_result.local_path
             logger.debug(f"Cached image: {article.image_url} -> {local_image_path}")
         else:
-            logger.warning(f"Image download failed: {image_result.error}")
+            logger.warning(
+                f"Image download failed, skipping (no text-only fallback): {image_result.error}"
+            )
+            async with db_lock:
+                mark_url_seen(
+                    db_conn,
+                    article.url,
+                    content_hash,
+                    "failed",
+                    f"image download failed: {image_result.error}",
+                    normalized=normalized,
+                )
+            return "failed"
+
+    # Classify content (multimodal — with downloaded media)
+    classification = await classify_article(
+        gemini_client,
+        config.gemini_model,
+        article.title,
+        article.content,
+        source_type=article.source_type,
+        media_path=gemini_media_path,
+        media_type=article.media_type,
+    )
+
+    if not classification.is_relevant:
+        logger.debug(f"Skipped: {article.title[:50]} - {classification.reason}")
+        _cleanup_media(local_image_path, local_video_path, compressed_tmp_path)
+        async with db_lock:
+            mark_url_seen(
+                db_conn,
+                article.url,
+                content_hash,
+                "irrelevant",
+                classification.reason,
+                normalized=normalized,
+            )
+        return "irrelevant"
 
     # Translate (with source name, media type, and media for multimodal)
     try:
@@ -270,14 +294,11 @@ async def _process_article(
             media_path=gemini_media_path,
         )
     finally:
-        if compressed_tmp_path:
-            try:
-                os.remove(compressed_tmp_path)
-            except OSError:
-                pass
+        _cleanup_media(compressed_tmp_path)
 
     if not translation.success:
         logger.warning(f"Translation failed for {article.url}: {translation.error}")
+        _cleanup_media(local_image_path, local_video_path)
         async with db_lock:
             mark_url_seen(
                 db_conn,

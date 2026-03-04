@@ -169,6 +169,8 @@ CLASSIFIER_PROMPT = """You are a content classifier for a visual-first Telegram 
 
 Analyze the following article/post and determine if it's suitable for a visually-driven "wow factor" channel.
 
+IMPORTANT: If an image or video is attached, you MUST analyze its visual content carefully. The image/video is the primary source of truth — titles can be vague or misleading.
+
 INCLUDE content about:
 - Unique machines, specialized tools, and engineering marvels
 - High-action nature clips and stunning wildlife
@@ -197,7 +199,6 @@ EXCLUDE content that:
 
 Article Title: {title}
 Article Content: {content}
-Media URL: {media_url}
 Source Type: {source_type}
 
 Respond ONLY with valid JSON:
@@ -334,13 +335,19 @@ async def classify_article(
     model: str,
     title: str,
     content: str,
-    media_url: Optional[str] = None,
     source_type: str = "rss",
+    media_path: Optional[str] = None,
+    media_type: str = "image",
 ) -> ClassificationResult:
     """
     Classify if article is suitable for the visual-first channel.
+    Optionally sends media (image/video) to Gemini for multimodal classification.
     Returns is_relevant=False on any error.
     Uses exponential backoff for rate limits.
+
+    Args:
+        media_path: local path to media file to send alongside text
+        media_type: "image" or "video" - used for MIME type detection
     """
     global _consecutive_failures
 
@@ -355,14 +362,24 @@ async def classify_article(
         prompt = CLASSIFIER_PROMPT.format(
             title=title,
             content=truncated_content,
-            media_url=media_url or "None",
             source_type=source_type,
         )
+
+        contents = []
+        if media_path:
+            media_bytes = _read_media_file(media_path)
+            if media_bytes:
+                mime = _detect_mime_type(media_path, media_type)
+                contents.append(
+                    types.Part.from_bytes(data=media_bytes, mime_type=mime)
+                )
+                logger.debug(f"Sending media to classifier: {media_path} ({mime})")
+        contents.append(prompt)
 
         response = await call_with_backoff(
             client.aio.models.generate_content,
             model=model,
-            contents=prompt,
+            contents=contents,
         )
 
         _token_stats["classify_calls"] += 1
