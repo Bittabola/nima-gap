@@ -22,6 +22,10 @@ _token_stats = {
     "output_tokens": 0,
 }
 
+# Circuit breaker state
+_consecutive_failures = 0
+CIRCUIT_BREAKER_THRESHOLD = 3
+
 
 def reset_token_stats() -> None:
     """Reset token statistics for a new fetch cycle."""
@@ -34,6 +38,17 @@ def reset_token_stats() -> None:
 def get_token_stats() -> dict:
     """Get current token usage statistics."""
     return _token_stats.copy()
+
+
+def reset_circuit_breaker() -> None:
+    """Reset circuit breaker state (call at start of each fetch cycle)."""
+    global _consecutive_failures
+    _consecutive_failures = 0
+
+
+def is_circuit_open() -> bool:
+    """Check if circuit breaker is open (too many consecutive failures)."""
+    return _consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD
 
 
 def _log_token_usage(response, call_type: str) -> None:
@@ -51,6 +66,10 @@ def _log_token_usage(response, call_type: str) -> None:
     except Exception:
         pass  # Don't fail if usage metadata unavailable
 
+
+# Content truncation limits
+CLASSIFY_CONTENT_LIMIT = 3000
+TRANSLATE_CONTENT_LIMIT = 4000
 
 # Exponential backoff settings
 MAX_RETRIES = 5
@@ -322,9 +341,15 @@ async def classify_article(
     Returns is_relevant=False on any error.
     Uses exponential backoff for rate limits.
     """
+    global _consecutive_failures
+
+    if is_circuit_open():
+        return ClassificationResult(
+            is_relevant=False, reason="Circuit breaker open"
+        )
+
     try:
-        # Truncate content to avoid token limits
-        truncated_content = content[:3000] if len(content) > 3000 else content
+        truncated_content = content[:CLASSIFY_CONTENT_LIMIT] if len(content) > CLASSIFY_CONTENT_LIMIT else content
 
         prompt = CLASSIFIER_PROMPT.format(
             title=title,
@@ -333,7 +358,6 @@ async def classify_article(
             source_type=source_type,
         )
 
-        # Use backoff for API call
         response = await call_with_backoff(
             client.aio.models.generate_content,
             model=model,
@@ -342,10 +366,10 @@ async def classify_article(
 
         _token_stats["classify_calls"] += 1
         _log_token_usage(response, "Classification")
+        _consecutive_failures = 0  # Reset on success
 
         # Parse JSON response
         text = response.text.strip()
-        # Handle potential markdown code blocks
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
@@ -368,7 +392,10 @@ async def classify_article(
         )
 
     except Exception as e:
-        logger.error(f"Classification failed: {e}")
+        _consecutive_failures += 1
+        logger.error(
+            f"Classification failed ({_consecutive_failures}/{CIRCUIT_BREAKER_THRESHOLD}): {e}"
+        )
         return ClassificationResult(is_relevant=False, reason=f"Error: {e}")
 
 
@@ -421,9 +448,15 @@ async def translate_article(
         media_type: "image" or "video" - tells AI what kind of media is attached
         media_path: local path to media file to send alongside text
     """
+    global _consecutive_failures
+
+    if is_circuit_open():
+        return TranslationResult(
+            content="", success=False, error="Circuit breaker open"
+        )
+
     try:
-        # Truncate content to avoid token limits
-        truncated_content = content[:4000] if len(content) > 4000 else content
+        truncated_content = content[:TRANSLATE_CONTENT_LIMIT] if len(content) > TRANSLATE_CONTENT_LIMIT else content
 
         prompt = TRANSLATOR_PROMPT.format(
             title=title,
@@ -433,7 +466,6 @@ async def translate_article(
             media_type=media_type,
         )
 
-        # Build multimodal content if media is available
         contents = []
         if media_path:
             media_bytes = _read_media_file(media_path)
@@ -445,7 +477,6 @@ async def translate_article(
                 logger.debug(f"Sending media to Gemini: {media_path} ({mime})")
         contents.append(prompt)
 
-        # Use backoff for API call
         response = await call_with_backoff(
             client.aio.models.generate_content,
             model=model,
@@ -454,6 +485,7 @@ async def translate_article(
 
         _token_stats["translate_calls"] += 1
         _log_token_usage(response, "Translation")
+        _consecutive_failures = 0  # Reset on success
 
         return TranslationResult(
             content=response.text.strip(),
@@ -461,7 +493,10 @@ async def translate_article(
         )
 
     except Exception as e:
-        logger.error(f"Translation failed: {e}")
+        _consecutive_failures += 1
+        logger.error(
+            f"Translation failed ({_consecutive_failures}/{CIRCUIT_BREAKER_THRESHOLD}): {e}"
+        )
         return TranslationResult(
             content="",
             success=False,

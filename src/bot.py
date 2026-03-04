@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_LENGTH = 4000
 MAX_CAPTION_LENGTH = 1024
+MAX_RESEND = 10
 
 
 def truncate(text: str, max_length: int) -> str:
@@ -79,21 +80,93 @@ def truncate(text: str, max_length: int) -> str:
     return truncated + suffix
 
 
+async def _send_with_media(
+    bot: Bot,
+    chat_id,
+    article: Article,
+    content: str,
+    parse_mode: str = "HTML",
+    reply_markup=None,
+) -> tuple[bool, bool, Optional[str]]:
+    """Try sending with video -> image -> text.
+
+    Returns (success, media_failed, error_message).
+    """
+    media_failed = False
+    media_error = None
+
+    # Try video if available
+    if article.media_type == "video" and article.local_video_path:
+        try:
+            with open(article.local_video_path, "rb") as video_file:
+                await bot.send_video(
+                    chat_id=chat_id,
+                    video=video_file,
+                    caption=truncate(content, MAX_CAPTION_LENGTH),
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                    supports_streaming=True,
+                    width=article.video_width,
+                    height=article.video_height,
+                )
+            return True, False, None
+        except Exception as e:
+            media_failed = True
+            media_error = str(e)
+            logger.warning(f"Video send failed for article {article.id}: {e}")
+
+    # Try image if available
+    image_source = article.local_image_path or article.image_url
+    if image_source and (not media_failed or article.media_type == "video"):
+        try:
+            if article.local_image_path:
+                with open(article.local_image_path, "rb") as photo_file:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo_file,
+                        caption=truncate(content, MAX_CAPTION_LENGTH),
+                        parse_mode=parse_mode,
+                        reply_markup=reply_markup,
+                    )
+            else:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=article.image_url,
+                    caption=truncate(content, MAX_CAPTION_LENGTH),
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+            return True, False, None
+        except Exception as e:
+            media_failed = True
+            media_error = str(e)
+            logger.warning(f"Image send failed for article {article.id}: {e}")
+
+    # Text-only fallback
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=truncate(content, MAX_MESSAGE_LENGTH),
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+        return True, media_failed, media_error
+    except Exception as e:
+        logger.error(f"Text send failed for article {article.id}: {e}")
+        return False, media_failed, media_error
+
+
 async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> None:
     """Send article to admin for approval with media preview."""
-    # Format message
     uzbek_preview = truncate(article.uzbek_content or "", 1500)
-
-    # Add media type indicator
     media_indicator = "🎬" if article.media_type == "video" else "🖼"
 
-    # Only show summary if it's different from the title
     summary_text = ""
     if (
         article.original_summary
         and article.original_summary.strip() != article.original_title.strip()
     ):
-        # Check if summary is not just the title with minor differences
         if not article.original_title.strip().startswith(
             article.original_summary.strip()[:50]
         ):
@@ -109,7 +182,6 @@ async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> No
 
 {uzbek_preview}"""
 
-    # Create approval buttons
     keyboard = InlineKeyboardMarkup(
         [
             [
@@ -123,67 +195,11 @@ async def send_approval_request(bot: Bot, admin_id: int, article: Article) -> No
         ]
     )
 
-    try:
-        # Try to send with video if available
-        if article.media_type == "video" and article.local_video_path:
-            try:
-                with open(article.local_video_path, "rb") as video_file:
-                    await bot.send_video(
-                        chat_id=admin_id,
-                        video=video_file,
-                        caption=truncate(message, MAX_CAPTION_LENGTH),
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                        supports_streaming=True,
-                        width=article.video_width,
-                        height=article.video_height,
-                    )
-                return
-            except Exception as e:
-                logger.warning(
-                    f"Failed to send video preview for article {article.id}: {e}"
-                )
-                # Fall through to image or text-only
-
-        # Try to send with image if available
-        image_path = article.local_image_path or article.image_url
-        if image_path:
-            try:
-                # Use local file if available, otherwise use URL
-                if article.local_image_path:
-                    with open(article.local_image_path, "rb") as photo_file:
-                        await bot.send_photo(
-                            chat_id=admin_id,
-                            photo=photo_file,
-                            caption=truncate(message, MAX_CAPTION_LENGTH),
-                            parse_mode="HTML",
-                            reply_markup=keyboard,
-                        )
-                else:
-                    await bot.send_photo(
-                        chat_id=admin_id,
-                        photo=article.image_url,
-                        caption=truncate(message, MAX_CAPTION_LENGTH),
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                    )
-                return
-            except Exception as e:
-                logger.warning(
-                    f"Failed to send image preview for article {article.id}: {e}"
-                )
-                # Fall through to text-only
-
-        # Text-only fallback (no media or media failed)
-        await bot.send_message(
-            chat_id=admin_id,
-            text=truncate(message, MAX_MESSAGE_LENGTH),
-            parse_mode="HTML",
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        logger.error(f"Failed to send approval request for article {article.id}: {e}")
+    success, _, _ = await _send_with_media(
+        bot, admin_id, article, message, reply_markup=keyboard
+    )
+    if not success:
+        logger.error(f"Failed to send approval request for article {article.id}")
 
 
 async def publish_article(
@@ -195,88 +211,15 @@ async def publish_article(
     Notifies admin if media sending fails.
     Returns True on success.
     """
-    content = truncate(article.uzbek_content or "", MAX_MESSAGE_LENGTH)
-    media_failed = False
-    media_error = None
+    content = article.uzbek_content or ""
 
-    # Try with video if available
-    if article.media_type == "video" and article.local_video_path:
+    success, media_failed, media_error = await _send_with_media(
+        bot, channel_id, article, content
+    )
+
+    if success and media_failed and admin_id:
+        media_type_label = "Video" if article.media_type == "video" else "Rasm"
         try:
-            with open(article.local_video_path, "rb") as video_file:
-                sent_message = await bot.send_video(
-                    chat_id=channel_id,
-                    video=video_file,
-                    caption=truncate(content, MAX_CAPTION_LENGTH),
-                    parse_mode="HTML",
-                    supports_streaming=True,
-                    width=article.video_width,
-                    height=article.video_height,
-                )
-            # Verify the video was uploaded to Telegram correctly
-            if sent_message and sent_message.video:
-                logger.info(
-                    f"Video upload verified for article {article.id}: "
-                    f"file_id={sent_message.video.file_id}, "
-                    f"size={sent_message.video.file_size} bytes"
-                )
-                return True
-            else:
-                media_failed = True
-                media_error = (
-                    "Telegram accepted the request but no video object in response"
-                )
-                logger.warning(
-                    f"Video upload not confirmed for article {article.id}: response has no video"
-                )
-        except Exception as e:
-            media_failed = True
-            media_error = str(e)
-            logger.warning(f"Video send failed for article {article.id}: {e}")
-
-    # Try with image if available (including as fallback for failed video)
-    if not media_failed or (
-        article.media_type == "video"
-        and (article.local_image_path or article.image_url)
-    ):
-        image_path = article.local_image_path or article.image_url
-        if image_path:
-            try:
-                # Prefer local cached image
-                if article.local_image_path:
-                    with open(article.local_image_path, "rb") as photo_file:
-                        await bot.send_photo(
-                            chat_id=channel_id,
-                            photo=photo_file,
-                            caption=truncate(content, MAX_CAPTION_LENGTH),
-                            parse_mode="HTML",
-                        )
-                    return True
-                else:
-                    # Fall back to URL
-                    await bot.send_photo(
-                        chat_id=channel_id,
-                        photo=article.image_url,
-                        caption=truncate(content, MAX_CAPTION_LENGTH),
-                        parse_mode="HTML",
-                    )
-                    return True
-            except Exception as e:
-                media_failed = True
-                media_error = str(e)
-                logger.warning(f"Image send failed for article {article.id}: {e}")
-
-    # Text-only (fallback or no media)
-    try:
-        await bot.send_message(
-            chat_id=channel_id,
-            text=content,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-
-        # Notify admin if media failed
-        if media_failed and admin_id:
-            media_type_label = "Video" if article.media_type == "video" else "Rasm"
             await bot.send_message(
                 chat_id=admin_id,
                 text=f"⚠️ <b>{media_type_label} yuborilmadi</b>\n\n"
@@ -285,11 +228,10 @@ async def publish_article(
                 f"Hikoya mediasiz nashr qilindi.",
                 parse_mode="HTML",
             )
+        except Exception as e:
+            logger.warning(f"Failed to notify admin about media failure: {e}")
 
-        return True
-    except Exception as e:
-        logger.error(f"Failed to publish article {article.id}: {e}")
-        return False
+    return success
 
 
 async def notify_admin_error(bot: Bot, admin_id: int, error: str) -> None:
@@ -400,9 +342,7 @@ async def resend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("📭 Kutilayotgan hikoyalar yo'q")
         return
 
-    # Limit to 10 articles per resend to avoid flooding
-    max_resend = 10
-    to_send = pending[:max_resend]
+    to_send = pending[:MAX_RESEND]
     remaining = len(pending) - len(to_send)
 
     await update.message.reply_text(

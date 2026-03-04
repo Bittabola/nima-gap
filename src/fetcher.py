@@ -214,7 +214,10 @@ async def fetch_rss(http_client: httpx.AsyncClient, url: str) -> list[FetchedArt
         response.raise_for_status()
 
         loop = asyncio.get_running_loop()
-        feed = await loop.run_in_executor(None, feedparser.parse, response.text)
+        feed = await asyncio.wait_for(
+            loop.run_in_executor(None, feedparser.parse, response.text),
+            timeout=30,
+        )
 
         for entry in feed.entries[:20]:  # Limit to recent 20
             # Extract content
@@ -404,15 +407,6 @@ def extract_reddit_media(post_data: dict) -> tuple[Optional[str], str]:
     return thumbnail, "image"
 
 
-def extract_reddit_media_url(post_data: dict) -> Optional[str]:
-    """
-    Extract the best media URL from a Reddit post.
-    Legacy wrapper for compatibility.
-    """
-    url, _ = extract_reddit_media(post_data)
-    return url
-
-
 async def fetch_reddit(
     http_client: httpx.AsyncClient,
     subreddit_name: str,
@@ -480,8 +474,16 @@ async def fetch_reddit(
 async def fetch_source(
     source: dict,
     http_client: httpx.AsyncClient,
+    delay: float = 0.0,
 ) -> list[FetchedArticle]:
-    """Fetch articles from a source based on its type."""
+    """Fetch articles from a source based on its type.
+
+    Args:
+        delay: Seconds to wait before fetching (for staggering Reddit requests).
+    """
+    if delay > 0:
+        await asyncio.sleep(delay)
+
     source_type = source.get("type", "rss")
 
     if source_type == "reddit":

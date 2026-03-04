@@ -31,7 +31,11 @@ class Article:
     normalized_url: Optional[str] = None
     video_width: Optional[int] = None
     video_height: Optional[int] = None
+    publish_fail_count: int = 0
 
+
+# Title similarity scan limit
+TITLE_SCAN_LIMIT = 500
 
 # Tracking params to strip from URLs for normalization
 TRACKING_PARAMS = {
@@ -112,12 +116,91 @@ def title_similarity(title1: str, title2: str) -> float:
     return SequenceMatcher(None, title1.lower().strip(), title2.lower().strip()).ratio()
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
+    try:
+        conn.execute(f"SELECT {column} FROM {table} LIMIT 1")  # noqa: S608
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def _get_schema_version(conn: sqlite3.Connection) -> int:
+    """Get current schema version, or -1 if schema_version table doesn't exist."""
+    try:
+        cursor = conn.execute("SELECT version FROM schema_version")
+        row = cursor.fetchone()
+        return row[0] if row else 0
+    except sqlite3.OperationalError:
+        return -1
+
+
+def _bootstrap_version(conn: sqlite3.Connection) -> int:
+    """Detect schema version for existing databases without schema_version table."""
+    # Check which columns exist to determine version
+    if not _column_exists(conn, "articles", "id"):
+        return 0  # Fresh DB, no tables yet
+    if not _column_exists(conn, "articles", "content_hash"):
+        return 0
+    if not _column_exists(conn, "articles", "local_image_path"):
+        return 1
+    if not _column_exists(conn, "articles", "local_video_path"):
+        return 2
+    if not _column_exists(conn, "articles", "media_type"):
+        return 3
+    if not _column_exists(conn, "articles", "video_width"):
+        return 4
+    if not _column_exists(conn, "articles", "normalized_url"):
+        return 6
+    if not _column_exists(conn, "articles", "publish_fail_count"):
+        return 7
+    return 8  # All migrations applied
+
+
+# Numbered migrations. Each is a callable(conn) that applies one migration step.
+# New databases get all columns in CREATE TABLE, so these only run on older DBs.
+_MIGRATIONS = [
+    # 0 -> 1: add content_hash
+    lambda conn: conn.execute("ALTER TABLE articles ADD COLUMN content_hash TEXT"),
+    # 1 -> 2: add local_image_path
+    lambda conn: conn.execute("ALTER TABLE articles ADD COLUMN local_image_path TEXT"),
+    # 2 -> 3: add local_video_path
+    lambda conn: conn.execute("ALTER TABLE articles ADD COLUMN local_video_path TEXT"),
+    # 3 -> 4: add media_type
+    lambda conn: conn.execute(
+        "ALTER TABLE articles ADD COLUMN media_type TEXT NOT NULL DEFAULT 'image'"
+    ),
+    # 4 -> 5: add video_width
+    lambda conn: conn.execute("ALTER TABLE articles ADD COLUMN video_width INTEGER"),
+    # 5 -> 6: add video_height
+    lambda conn: conn.execute("ALTER TABLE articles ADD COLUMN video_height INTEGER"),
+    # 6 -> 7: add normalized_url + backfill
+    lambda conn: _migration_add_normalized_url(conn),
+    # 7 -> 8: add publish_fail_count
+    lambda conn: conn.execute(
+        "ALTER TABLE articles ADD COLUMN publish_fail_count INTEGER NOT NULL DEFAULT 0"
+    ),
+]
+
+
+def _migration_add_normalized_url(conn: sqlite3.Connection) -> None:
+    """Migration 6->7: add normalized_url column and backfill existing rows."""
+    conn.execute("ALTER TABLE articles ADD COLUMN normalized_url TEXT")
+    rows = conn.execute("SELECT id, original_url FROM articles").fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE articles SET normalized_url = ? WHERE id = ?",
+            (normalize_url(row["original_url"]), row["id"]),
+        )
+
+
 def init_database(db_path: str) -> sqlite3.Connection:
-    """Initialize database and create tables."""
+    """Initialize database with versioned migrations."""
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
 
+    # Create core tables (includes all columns for fresh databases)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS articles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,7 +217,10 @@ def init_database(db_path: str) -> sqlite3.Connection:
             uzbek_content TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
-            published_at TEXT
+            published_at TEXT,
+            publish_fail_count INTEGER NOT NULL DEFAULT 0,
+            video_width INTEGER,
+            video_height INTEGER
         )
     """)
 
@@ -148,7 +234,6 @@ def init_database(db_path: str) -> sqlite3.Connection:
         ON articles(content_hash)
     """)
 
-    # Table to track all seen URLs (including skipped/failed)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS seen_urls (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,57 +256,32 @@ def init_database(db_path: str) -> sqlite3.Connection:
         ON seen_urls(created_at)
     """)
 
-    # Migration: add content_hash column if missing (for existing databases)
-    try:
-        conn.execute("SELECT content_hash FROM articles LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE articles ADD COLUMN content_hash TEXT")
+    # Schema versioning
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        )
+    """)
 
-    # Migration: add local_image_path column if missing
-    try:
-        conn.execute("SELECT local_image_path FROM articles LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE articles ADD COLUMN local_image_path TEXT")
+    version = _get_schema_version(conn)
 
-    # Migration: add local_video_path column if missing
-    try:
-        conn.execute("SELECT local_video_path FROM articles LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE articles ADD COLUMN local_video_path TEXT")
-
-    # Migration: add media_type column if missing
-    try:
-        conn.execute("SELECT media_type FROM articles LIMIT 1")
-    except sqlite3.OperationalError:
+    if version == -1:
+        # schema_version table just created — bootstrap from column detection
+        version = _bootstrap_version(conn)
+        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+    elif version == 0 and not _column_exists(conn, "articles", "id"):
+        # Truly fresh database — set to latest version
+        version = len(_MIGRATIONS)
         conn.execute(
-            "ALTER TABLE articles ADD COLUMN media_type TEXT NOT NULL DEFAULT 'image'"
+            "UPDATE schema_version SET version = ?", (version,)
         )
 
-    # Migration: add video_width column if missing
-    try:
-        conn.execute("SELECT video_width FROM articles LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE articles ADD COLUMN video_width INTEGER")
+    # Run pending migrations
+    for i in range(version, len(_MIGRATIONS)):
+        _MIGRATIONS[i](conn)
+        conn.execute("UPDATE schema_version SET version = ?", (i + 1,))
 
-    # Migration: add video_height column if missing
-    try:
-        conn.execute("SELECT video_height FROM articles LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE articles ADD COLUMN video_height INTEGER")
-
-    # Migration: add normalized_url column and backfill
-    try:
-        conn.execute("SELECT normalized_url FROM articles LIMIT 1")
-    except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE articles ADD COLUMN normalized_url TEXT")
-        rows = conn.execute("SELECT id, original_url FROM articles").fetchall()
-        for row in rows:
-            conn.execute(
-                "UPDATE articles SET normalized_url = ? WHERE id = ?",
-                (normalize_url(row["original_url"]), row["id"]),
-            )
-
-    # Create index on normalized_url (after migration ensures column exists)
+    # Create index on normalized_url (safe to run always)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_articles_normalized_url
         ON articles(normalized_url)
@@ -231,9 +291,12 @@ def init_database(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def article_exists(conn: sqlite3.Connection, url: str) -> bool:
+def article_exists(
+    conn: sqlite3.Connection, url: str, normalized: Optional[str] = None
+) -> bool:
     """Check if article URL already exists (uses indexed normalized_url column)."""
-    normalized = normalize_url(url)
+    if normalized is None:
+        normalized = normalize_url(url)
     cursor = conn.execute(
         "SELECT 1 FROM articles WHERE normalized_url = ?",
         (normalized,),
@@ -241,9 +304,12 @@ def article_exists(conn: sqlite3.Connection, url: str) -> bool:
     return cursor.fetchone() is not None
 
 
-def url_seen(conn: sqlite3.Connection, url: str) -> bool:
+def url_seen(
+    conn: sqlite3.Connection, url: str, normalized: Optional[str] = None
+) -> bool:
     """Check if URL has been seen before (in seen_urls table)."""
-    normalized = normalize_url(url)
+    if normalized is None:
+        normalized = normalize_url(url)
     cursor = conn.execute(
         "SELECT 1 FROM seen_urls WHERE normalized_url = ?", (normalized,)
     )
@@ -279,16 +345,15 @@ def find_similar_title(
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
 
     # Only fetch id and title for comparison (more efficient)
-    # Limit to 500 most recent to avoid O(n) scans on large databases
     cursor = conn.execute(
         """
         SELECT id, original_title FROM articles
         WHERE status IN ('pending', 'approved', 'published')
         AND created_at >= ?
         ORDER BY created_at DESC
-        LIMIT 500
+        LIMIT ?
         """,
-        (cutoff,),
+        (cutoff, TITLE_SCAN_LIMIT),
     )
     for row in cursor:
         existing_title = row["original_title"]
@@ -304,9 +369,12 @@ def mark_url_seen(
     content_hash: Optional[str],
     status: str,
     reason: Optional[str] = None,
+    normalized: Optional[str] = None,
+    commit: bool = True,
 ) -> None:
     """Mark a URL as seen with its status and reason."""
-    normalized = normalize_url(url)
+    if normalized is None:
+        normalized = normalize_url(url)
     try:
         conn.execute(
             """
@@ -322,7 +390,6 @@ def mark_url_seen(
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
-        conn.commit()
     except sqlite3.IntegrityError:
         # Already exists, update it
         conn.execute(
@@ -332,6 +399,7 @@ def mark_url_seen(
             """,
             (status, reason, content_hash, normalized),
         )
+    if commit:
         conn.commit()
 
 
@@ -349,9 +417,12 @@ def create_article(
     uzbek_content: str,
     video_width: Optional[int] = None,
     video_height: Optional[int] = None,
+    normalized: Optional[str] = None,
+    commit: bool = True,
 ) -> int:
     """Create article with status 'pending'. Returns article ID."""
-    normalized = normalize_url(original_url)
+    if normalized is None:
+        normalized = normalize_url(original_url)
     cursor = conn.execute(
         """
         INSERT INTO articles
@@ -377,7 +448,8 @@ def create_article(
             video_height,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.lastrowid
 
 
@@ -389,14 +461,15 @@ def get_article_by_id(conn: sqlite3.Connection, article_id: int) -> Optional[Art
 
 
 def update_article_status(
-    conn: sqlite3.Connection, article_id: int, status: str
+    conn: sqlite3.Connection, article_id: int, status: str, commit: bool = True
 ) -> None:
     """Update article status."""
     conn.execute(
         "UPDATE articles SET status = ? WHERE id = ?",
         (status, article_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_next_publishable(conn: sqlite3.Connection) -> Optional[Article]:
@@ -472,6 +545,23 @@ def reject_all_pending(conn: sqlite3.Connection) -> int:
     )
     conn.commit()
     return cursor.rowcount
+
+
+MAX_PUBLISH_RETRIES = 3
+
+
+def increment_publish_failures(conn: sqlite3.Connection, article_id: int) -> int:
+    """Increment publish failure count and return the new value."""
+    conn.execute(
+        "UPDATE articles SET publish_fail_count = COALESCE(publish_fail_count, 0) + 1 WHERE id = ?",
+        (article_id,),
+    )
+    conn.commit()
+    cursor = conn.execute(
+        "SELECT publish_fail_count FROM articles WHERE id = ?", (article_id,)
+    )
+    row = cursor.fetchone()
+    return row[0] if row else 0
 
 
 def cleanup_old_seen_urls(conn: sqlite3.Connection, max_age_days: int = 90) -> int:

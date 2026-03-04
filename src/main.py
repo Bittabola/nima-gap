@@ -11,6 +11,8 @@ from .ai import (
     classify_article,
     get_token_stats,
     init_gemini,
+    is_circuit_open,
+    reset_circuit_breaker,
     reset_token_stats,
     translate_article,
 )
@@ -22,6 +24,7 @@ from .bot import (
 )
 from .config import load_config
 from .database import (
+    MAX_PUBLISH_RETRIES,
     article_exists,
     cleanup_old_seen_urls,
     compute_content_hash,
@@ -31,14 +34,17 @@ from .database import (
     get_last_publish_time,
     get_next_publishable,
     get_queue_count,
+    increment_publish_failures,
     init_database,
     mark_published,
     mark_url_seen,
+    normalize_url,
     reject_all_pending,
     update_article_status,
     url_seen,
 )
 from .fetcher import FetchedArticle, create_http_client, fetch_source
+from .health import start_health_server
 from .media import (
     cleanup_old_images,
     cleanup_old_videos,
@@ -46,6 +52,270 @@ from .media import (
     download_image,
     download_video,
 )
+
+# Scheduler intervals (seconds)
+REMAINING_CHECK_INTERVAL = 300  # 5 minutes
+REFETCH_INTERVAL = 10800  # 3 hours
+CLEANUP_INTERVAL = 86400  # 24 hours
+
+
+def _interleave_sources(
+    articles_by_source: list[list[tuple[str, FetchedArticle]]],
+) -> list[tuple[str, FetchedArticle]]:
+    """Round-robin interleave articles from different sources."""
+    all_articles: list[tuple[str, FetchedArticle]] = []
+    while articles_by_source:
+        empty_sources = []
+        for i, source_list in enumerate(articles_by_source):
+            if source_list:
+                all_articles.append(source_list.pop(0))
+            if not source_list:
+                empty_sources.append(i)
+        for i in reversed(empty_sources):
+            articles_by_source.pop(i)
+    return all_articles
+
+
+async def _process_article(
+    config,
+    db_conn,
+    db_lock,
+    http_client,
+    gemini_client,
+    source_name: str,
+    article: FetchedArticle,
+) -> str:
+    """Process a single article through the pipeline.
+
+    Returns one of: "new", "duplicate", "irrelevant", "failed".
+    """
+    logger = logging.getLogger(__name__)
+
+    # Normalize URL once upfront
+    normalized = normalize_url(article.url)
+
+    # Check URL deduplication (normalized)
+    if article_exists(db_conn, article.url, normalized=normalized) or url_seen(
+        db_conn, article.url, normalized=normalized
+    ):
+        return "duplicate"
+
+    # Compute content hash for duplicate detection
+    content_hash = compute_content_hash(article.title, article.content)
+
+    # Check content hash for similar content from different sources
+    if content_hash_exists(db_conn, content_hash):
+        logger.debug(f"Duplicate content hash: {article.title[:50]}")
+        async with db_lock:
+            mark_url_seen(
+                db_conn,
+                article.url,
+                content_hash,
+                "duplicate",
+                "content hash match",
+                normalized=normalized,
+            )
+        return "duplicate"
+
+    # Check for similar titles (run in executor to avoid blocking event loop)
+    loop = asyncio.get_running_loop()
+    similar = await loop.run_in_executor(
+        None, find_similar_title, db_conn, article.title
+    )
+    if similar:
+        logger.debug(
+            f"Similar title found: {article.title[:50]} ~ {similar.original_title[:50]}"
+        )
+        async with db_lock:
+            mark_url_seen(
+                db_conn,
+                article.url,
+                content_hash,
+                "duplicate",
+                f"similar to article {similar.id}",
+                normalized=normalized,
+            )
+        return "duplicate"
+
+    # Pre-filter: skip posts without media (save API calls)
+    if not article.image_url:
+        logger.debug(f"Skipped (no media): {article.title[:50]}")
+        async with db_lock:
+            mark_url_seen(
+                db_conn,
+                article.url,
+                content_hash,
+                "irrelevant",
+                "no media",
+                normalized=normalized,
+            )
+        return "irrelevant"
+
+    # Pre-filter: skip low-karma Reddit posts
+    if article.source_type == "reddit" and article.score < 1000:
+        logger.debug(f"Skipped (low karma {article.score}): {article.title[:50]}")
+        async with db_lock:
+            mark_url_seen(
+                db_conn,
+                article.url,
+                content_hash,
+                "irrelevant",
+                "low karma",
+                normalized=normalized,
+            )
+        return "irrelevant"
+
+    # Classify content
+    classification = await classify_article(
+        gemini_client,
+        config.gemini_model,
+        article.title,
+        article.content,
+        media_url=article.image_url,
+        source_type=article.source_type,
+    )
+
+    if not classification.is_relevant:
+        logger.debug(f"Skipped: {article.title[:50]} - {classification.reason}")
+        async with db_lock:
+            mark_url_seen(
+                db_conn,
+                article.url,
+                content_hash,
+                "irrelevant",
+                classification.reason,
+                normalized=normalized,
+            )
+        return "irrelevant"
+
+    # Download and cache media (before translation for multimodal)
+    local_image_path = None
+    local_video_path = None
+    video_width = None
+    video_height = None
+    gemini_media_path = None
+    compressed_tmp_path = None
+
+    if article.media_type == "video" and article.image_url:
+        video_url = (
+            article.url if article.source_type == "reddit" else article.image_url
+        )
+        video_result = await download_video(video_url, data_dir=config.data_dir)
+        if video_result.success and video_result.local_path:
+            video_file_size = (
+                os.path.getsize(video_result.local_path)
+                if os.path.exists(video_result.local_path)
+                else 0
+            )
+            if video_file_size > 0:
+                local_video_path = video_result.local_path
+                video_width = video_result.width
+                video_height = video_result.height
+                logger.info(
+                    f"Video verified: {video_url} -> {local_video_path} ({video_file_size} bytes)"
+                )
+                compressed = await compress_video_for_gemini(
+                    local_video_path, data_dir=config.data_dir
+                )
+                if compressed:
+                    gemini_media_path = compressed
+                    if compressed != local_video_path:
+                        compressed_tmp_path = compressed
+            else:
+                logger.warning(
+                    f"Video file empty or missing after download: {video_result.local_path}"
+                )
+                async with db_lock:
+                    mark_url_seen(
+                        db_conn,
+                        article.url,
+                        content_hash,
+                        "failed",
+                        "video file empty after download",
+                        normalized=normalized,
+                    )
+                return "failed"
+        else:
+            logger.warning(
+                f"Video download failed for video post, skipping: {video_result.error}"
+            )
+            async with db_lock:
+                mark_url_seen(
+                    db_conn,
+                    article.url,
+                    content_hash,
+                    "failed",
+                    f"video download failed: {video_result.error}",
+                    normalized=normalized,
+                )
+            return "failed"
+    elif article.image_url:
+        image_result = await download_image(
+            http_client, article.image_url, data_dir=config.data_dir
+        )
+        if image_result.success:
+            local_image_path = image_result.local_path
+            gemini_media_path = image_result.local_path
+            logger.debug(f"Cached image: {article.image_url} -> {local_image_path}")
+        else:
+            logger.warning(f"Image download failed: {image_result.error}")
+
+    # Translate (with source name, media type, and media for multimodal)
+    try:
+        translation = await translate_article(
+            gemini_client,
+            config.gemini_model,
+            article.title,
+            article.content,
+            article.url,
+            source_name=source_name,
+            media_type=article.media_type,
+            media_path=gemini_media_path,
+        )
+    finally:
+        if compressed_tmp_path:
+            try:
+                os.remove(compressed_tmp_path)
+            except OSError:
+                pass
+
+    if not translation.success:
+        logger.warning(f"Translation failed for {article.url}: {translation.error}")
+        async with db_lock:
+            mark_url_seen(
+                db_conn,
+                article.url,
+                content_hash,
+                "failed",
+                translation.error,
+                normalized=normalized,
+            )
+        return "failed"
+
+    # Save to database (batch commit: create + approve together)
+    async with db_lock:
+        article_id = create_article(
+            db_conn,
+            source_name=source_name,
+            original_url=article.url,
+            original_title=article.title,
+            original_summary=article.content[:2000],
+            content_hash=content_hash,
+            image_url=article.image_url,
+            local_image_path=local_image_path,
+            local_video_path=local_video_path,
+            media_type=article.media_type,
+            uzbek_content=translation.content,
+            video_width=video_width,
+            video_height=video_height,
+            normalized=normalized,
+            commit=False,
+        )
+        update_article_status(db_conn, article_id, "approved", commit=False)
+        db_conn.commit()
+
+    logger.info(f"New article: {article.title[:50]}")
+    return "new"
 
 
 async def fetch_job(
@@ -63,8 +333,9 @@ async def fetch_job(
     logger = logging.getLogger(__name__)
     logger.info("Starting fetch job...")
 
-    # Reset token stats for this cycle
+    # Reset stats and circuit breaker for this cycle
     reset_token_stats()
+    reset_circuit_breaker()
 
     errors = []
     new_articles = 0
@@ -73,36 +344,36 @@ async def fetch_job(
     failed = 0
     remaining = 0
 
-    # Collect articles from each source separately
-    articles_by_source: list[list[tuple[str, FetchedArticle]]] = []
+    # Collect articles from all sources concurrently
+    # Stagger Reddit requests by 2s each to respect rate limits
+    reddit_index = 0
+    tasks = []
+    source_names = []
     for source in config.sources:
         source_name = source.get("name", "Unknown")
-        try:
-            articles = await fetch_source(source, http_client)
-            logger.info(f"Fetched {len(articles)} from {source_name}")
-            source_articles = [(source_name, article) for article in articles]
-            if source_articles:
-                articles_by_source.append(source_articles)
-        except Exception as e:
-            error_msg = f"{source_name}: {e}"
+        source_names.append(source_name)
+        if source.get("type") == "reddit":
+            delay = reddit_index * 2.0
+            reddit_index += 1
+        else:
+            delay = 0.0
+        tasks.append(fetch_source(source, http_client, delay=delay))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    articles_by_source: list[list[tuple[str, FetchedArticle]]] = []
+    for source_name, result in zip(source_names, results):
+        if isinstance(result, Exception):
+            error_msg = f"{source_name}: {result}"
             logger.error(error_msg)
             errors.append(error_msg)
+        else:
+            logger.info(f"Fetched {len(result)} from {source_name}")
+            source_articles = [(source_name, article) for article in result]
+            if source_articles:
+                articles_by_source.append(source_articles)
 
-    # Interleave articles from different sources (round-robin)
-    # This ensures we don't process all articles from one source consecutively
-    all_articles = []
-    while articles_by_source:
-        # Take one article from each source in turn
-        empty_sources = []
-        for i, source_list in enumerate(articles_by_source):
-            if source_list:
-                all_articles.append(source_list.pop(0))
-            if not source_list:
-                empty_sources.append(i)
-        # Remove exhausted sources (in reverse order to preserve indices)
-        for i in reversed(empty_sources):
-            articles_by_source.pop(i)
-
+    all_articles = _interleave_sources(articles_by_source)
     logger.info(f"Total fetched: {len(all_articles)} articles (interleaved)")
 
     # Process articles with limit
@@ -110,7 +381,6 @@ async def fetch_job(
     max_to_process = config.max_new_articles_per_fetch
 
     for source_name, article in all_articles:
-        # Check if we've hit the limit
         if new_articles >= max_to_process:
             remaining = len(all_articles) - processed
             logger.info(
@@ -118,238 +388,34 @@ async def fetch_job(
             )
             break
 
+        # Abort early if Gemini API is consistently failing
+        if is_circuit_open():
+            remaining = len(all_articles) - processed
+            logger.warning(
+                f"Circuit breaker open — aborting fetch. {remaining} articles skipped."
+            )
+            await notify_admin_error(
+                bot, config.telegram_admin_id,
+                "Gemini API circuit breaker triggered — fetch aborted early.",
+            )
+            break
+
         processed += 1
 
         try:
-            # Check URL deduplication (normalized)
-            if article_exists(db_conn, article.url) or url_seen(db_conn, article.url):
-                skipped_duplicates += 1
-                continue
-
-            # Compute content hash for duplicate detection
-            content_hash = compute_content_hash(article.title, article.content)
-
-            # Check content hash for similar content from different sources
-            if content_hash_exists(db_conn, content_hash):
-                logger.debug(f"Duplicate content hash: {article.title[:50]}")
-                async with db_lock:
-                    mark_url_seen(
-                        db_conn,
-                        article.url,
-                        content_hash,
-                        "duplicate",
-                        "content hash match",
-                    )
-                skipped_duplicates += 1
-                continue
-
-            # Check for similar titles
-            similar = find_similar_title(db_conn, article.title)
-            if similar:
-                logger.debug(
-                    f"Similar title found: {article.title[:50]} ~ {similar.original_title[:50]}"
-                )
-                async with db_lock:
-                    mark_url_seen(
-                        db_conn,
-                        article.url,
-                        content_hash,
-                        "duplicate",
-                        f"similar to article {similar.id}",
-                    )
-                skipped_duplicates += 1
-                continue
-
-            # Pre-filter: skip posts without media (save API calls)
-            if not article.image_url:
-                logger.debug(f"Skipped (no media): {article.title[:50]}")
-                async with db_lock:
-                    mark_url_seen(
-                        db_conn, article.url, content_hash, "irrelevant", "no media"
-                    )
-                skipped_irrelevant += 1
-                continue
-
-            # Pre-filter: skip low-karma Reddit posts
-            if article.source_type == "reddit" and article.score < 1000:
-                logger.debug(
-                    f"Skipped (low karma {article.score}): {article.title[:50]}"
-                )
-                async with db_lock:
-                    mark_url_seen(
-                        db_conn, article.url, content_hash, "irrelevant", "low karma"
-                    )
-                skipped_irrelevant += 1
-                continue
-
-            # Classify content
-            classification = await classify_article(
-                gemini_client,
-                config.gemini_model,
-                article.title,
-                article.content,
-                media_url=article.image_url,
-                source_type=article.source_type,
+            result = await _process_article(
+                config, db_conn, db_lock, http_client, gemini_client,
+                source_name, article,
             )
-
-            if not classification.is_relevant:
-                logger.debug(f"Skipped: {article.title[:50]} - {classification.reason}")
-                async with db_lock:
-                    mark_url_seen(
-                        db_conn,
-                        article.url,
-                        content_hash,
-                        "irrelevant",
-                        classification.reason,
-                    )
+            if result == "new":
+                new_articles += 1
+                await asyncio.sleep(0.5)
+            elif result == "duplicate":
+                skipped_duplicates += 1
+            elif result == "irrelevant":
                 skipped_irrelevant += 1
-                continue
-
-            # Download and cache media (before translation for multimodal)
-            local_image_path = None
-            local_video_path = None
-            video_width = None
-            video_height = None
-            gemini_media_path = None  # Path to send to Gemini (may be compressed)
-            compressed_tmp_path = None  # Track temp file for cleanup
-
-            if article.media_type == "video" and article.image_url:
-                # For Reddit videos, use the post URL (yt-dlp handles it better)
-                # For other sources, use the direct video URL
-                video_url = (
-                    article.url
-                    if article.source_type == "reddit"
-                    else article.image_url
-                )
-                video_result = await download_video(
-                    video_url,
-                    data_dir=config.data_dir,
-                )
-                if video_result.success and video_result.local_path:
-                    # Verify the downloaded video file exists and is valid
-                    video_file_size = (
-                        os.path.getsize(video_result.local_path)
-                        if os.path.exists(video_result.local_path)
-                        else 0
-                    )
-                    if video_file_size > 0:
-                        local_video_path = video_result.local_path
-                        video_width = video_result.width
-                        video_height = video_result.height
-                        logger.info(
-                            f"Video verified: {video_url} -> {local_video_path} ({video_file_size} bytes)"
-                        )
-                        # Compress for Gemini if needed
-                        compressed = await compress_video_for_gemini(
-                            local_video_path,
-                            data_dir=config.data_dir,
-                        )
-                        if compressed:
-                            gemini_media_path = compressed
-                            if compressed != local_video_path:
-                                compressed_tmp_path = compressed
-                    else:
-                        logger.warning(
-                            f"Video file empty or missing after download: {video_result.local_path}"
-                        )
-                        async with db_lock:
-                            mark_url_seen(
-                                db_conn,
-                                article.url,
-                                content_hash,
-                                "failed",
-                                "video file empty after download",
-                            )
-                        failed += 1
-                        continue
-                else:
-                    logger.warning(
-                        f"Video download failed for video post, skipping: {video_result.error}"
-                    )
-                    async with db_lock:
-                        mark_url_seen(
-                            db_conn,
-                            article.url,
-                            content_hash,
-                            "failed",
-                            f"video download failed: {video_result.error}",
-                        )
-                    failed += 1
-                    continue
-            elif article.image_url:
-                # Download image
-                image_result = await download_image(
-                    http_client,
-                    article.image_url,
-                    data_dir=config.data_dir,
-                )
-                if image_result.success:
-                    local_image_path = image_result.local_path
-                    gemini_media_path = image_result.local_path
-                    logger.debug(
-                        f"Cached image: {article.image_url} -> {local_image_path}"
-                    )
-                else:
-                    logger.warning(f"Image download failed: {image_result.error}")
-
-            # Translate (with source name, media type, and media for multimodal)
-            try:
-                translation = await translate_article(
-                    gemini_client,
-                    config.gemini_model,
-                    article.title,
-                    article.content,
-                    article.url,
-                    source_name=source_name,
-                    media_type=article.media_type,
-                    media_path=gemini_media_path,
-                )
-            finally:
-                # Clean up compressed temp file
-                if compressed_tmp_path:
-                    try:
-                        os.remove(compressed_tmp_path)
-                    except OSError:
-                        pass
-
-            if not translation.success:
-                logger.warning(
-                    f"Translation failed for {article.url}: {translation.error}"
-                )
-                async with db_lock:
-                    mark_url_seen(
-                        db_conn, article.url, content_hash, "failed", translation.error
-                    )
+            elif result == "failed":
                 failed += 1
-                continue
-
-            # Save to database
-            async with db_lock:
-                article_id = create_article(
-                    db_conn,
-                    source_name=source_name,
-                    original_url=article.url,
-                    original_title=article.title,
-                    original_summary=article.content[:2000],
-                    content_hash=content_hash,
-                    image_url=article.image_url,
-                    local_image_path=local_image_path,
-                    local_video_path=local_video_path,
-                    media_type=article.media_type,
-                    uzbek_content=translation.content,
-                    video_width=video_width,
-                    video_height=video_height,
-                )
-
-                # Auto-publish: approve directly, skip manual approval
-                update_article_status(db_conn, article_id, "approved")
-
-            new_articles += 1
-            logger.info(f"New article: {article.title[:50]}")
-
-            # Small delay between articles (backoff handles rate limits)
-            await asyncio.sleep(0.5)
-
         except Exception as e:
             logger.error(f"Error processing article {article.url}: {e}")
             failed += 1
@@ -413,7 +479,23 @@ async def publish_job(config, db_conn, db_lock, bot) -> None:
             mark_published(db_conn, article.id)
         logger.info(f"Published: {article.original_title[:50]}")
     else:
-        logger.error(f"Failed to publish article {article.id}")
+        async with db_lock:
+            fail_count = increment_publish_failures(db_conn, article.id)
+        if fail_count >= MAX_PUBLISH_RETRIES:
+            async with db_lock:
+                update_article_status(db_conn, article.id, "rejected")
+            logger.error(
+                f"Article {article.id} rejected after {fail_count} publish failures"
+            )
+            await notify_admin_error(
+                bot, config.telegram_admin_id,
+                f"Article #{article.id} rejected after {fail_count} publish failures: "
+                f"{article.original_title[:100]}",
+            )
+        else:
+            logger.warning(
+                f"Failed to publish article {article.id} (attempt {fail_count}/{MAX_PUBLISH_RETRIES})"
+            )
 
 
 async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, app):
@@ -421,9 +503,9 @@ async def scheduler_loop(config, db_conn, db_lock, http_client, gemini_client, a
     logger = logging.getLogger(__name__)
     bot = app.bot
 
-    remaining_interval = 300  # 5 minutes if there are remaining articles
-    refetch_interval = 10800  # 3 hours - periodic retry when queue stays empty
-    cleanup_interval = 86400  # 24 hours
+    remaining_interval = REMAINING_CHECK_INTERVAL
+    refetch_interval = REFETCH_INTERVAL
+    cleanup_interval = CLEANUP_INTERVAL
     last_remaining_check = 0
     last_fetch_time = 0
     last_heartbeat = 0
@@ -591,7 +673,9 @@ async def main() -> None:
         db_conn.close()
         raise
 
-    # Start bot and scheduler
+    # Start health server, bot and scheduler
+    health_server = await start_health_server()
+
     async with app:
         await app.start()
         logger.info("Telegram bot started")
@@ -630,6 +714,8 @@ async def main() -> None:
                     pass
             await app.updater.stop()
             await app.stop()
+            health_server.close()
+            await health_server.wait_closed()
             await http_client.aclose()
             db_conn.close()
             logger.info("Shutdown complete")

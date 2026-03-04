@@ -48,7 +48,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install --no-cache-dir -r requirements.txt ruff
+          pip install --no-cache-dir -r requirements-dev.txt ruff
 
       - name: Lint with ruff
         run: ruff check .
@@ -120,7 +120,7 @@ jobs:
             --model opus \
             --output-format json \
             --json-schema "$REVIEW_SCHEMA" \
-            --max-turns 6 \
+            --max-turns 12 \
             --allowedTools "Read,Grep,Glob" \
             --dangerously-skip-permissions \
             --no-session-persistence)

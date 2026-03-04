@@ -67,91 +67,38 @@ def generate_filename(url: str, content_type: str) -> str:
     return f"{url_hash}{extension}"
 
 
-async def validate_image_url(
-    http_client: httpx.AsyncClient,
-    url: str,
-) -> tuple[bool, Optional[str], Optional[str]]:
-    """
-    Validate image URL with HEAD request.
-    Returns (is_valid, content_type, error_message).
-    """
-    if not url:
-        return False, None, "No URL provided"
-
-    # Basic URL validation
-    try:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return False, None, f"Invalid scheme: {parsed.scheme}"
-    except Exception as e:
-        return False, None, f"Invalid URL: {e}"
-
-    try:
-        response = await http_client.head(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            follow_redirects=True,
-        )
-
-        if response.status_code != 200:
-            return False, None, f"HTTP {response.status_code}"
-
-        content_type = response.headers.get("content-type", "").split(";")[0].strip()
-        if content_type not in VALID_CONTENT_TYPES:
-            return False, None, f"Invalid content type: {content_type}"
-
-        # Check content length if available
-        content_length = response.headers.get("content-length")
-        if content_length:
-            size = int(content_length)
-            if size > MAX_IMAGE_SIZE:
-                return False, None, f"Image too large: {size} bytes"
-            if size < MIN_IMAGE_SIZE:
-                return False, None, f"Image too small: {size} bytes"
-
-        return True, content_type, None
-
-    except httpx.TimeoutException:
-        return False, None, "Request timeout"
-    except httpx.RequestError as e:
-        return False, None, f"Request failed: {e}"
-    except Exception as e:
-        return False, None, f"Validation error: {e}"
-
-
 async def download_image(
     http_client: httpx.AsyncClient,
     url: str,
     data_dir: str = "data",
 ) -> ImageResult:
     """
-    Download and cache an image locally.
+    Download and cache an image locally with a single GET request.
+    Validates content-type and size from the response.
     Returns ImageResult with local path on success.
     """
     if not url:
         return ImageResult(success=False, error="No URL provided", original_url=url)
 
-    # Validate first
-    is_valid, content_type, error = await validate_image_url(http_client, url)
-    if not is_valid:
-        logger.warning(f"Image validation failed for {url}: {error}")
-        return ImageResult(success=False, error=error, original_url=url)
+    # Basic URL validation
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return ImageResult(
+                success=False,
+                error=f"Invalid scheme: {parsed.scheme}",
+                original_url=url,
+            )
+    except Exception as e:
+        return ImageResult(success=False, error=f"Invalid URL: {e}", original_url=url)
 
-    # Generate local path
-    images_dir = get_images_dir(data_dir)
-    filename = generate_filename(url, content_type)
-    local_path = images_dir / filename
+    # Check cache first (try all possible extensions)
+    cached = get_cached_image_path(url, data_dir)
+    if cached:
+        logger.debug(f"Image already cached: {cached}")
+        return ImageResult(success=True, local_path=cached, original_url=url)
 
-    # Check if already cached
-    if local_path.exists():
-        logger.debug(f"Image already cached: {local_path}")
-        return ImageResult(
-            success=True,
-            local_path=str(local_path),
-            original_url=url,
-        )
-
-    # Download
+    # Single GET request
     try:
         response = await http_client.get(
             url,
@@ -160,7 +107,16 @@ async def download_image(
         )
         response.raise_for_status()
 
-        # Verify size
+        # Validate content-type from response headers
+        content_type = response.headers.get("content-type", "").split(";")[0].strip()
+        if content_type not in VALID_CONTENT_TYPES:
+            return ImageResult(
+                success=False,
+                error=f"Invalid content type: {content_type}",
+                original_url=url,
+            )
+
+        # Validate size from response body
         content = response.content
         if len(content) > MAX_IMAGE_SIZE:
             return ImageResult(
@@ -176,6 +132,10 @@ async def download_image(
             )
 
         # Save to disk
+        images_dir = get_images_dir(data_dir)
+        filename = generate_filename(url, content_type)
+        local_path = images_dir / filename
+
         with open(local_path, "wb") as f:
             f.write(content)
 
