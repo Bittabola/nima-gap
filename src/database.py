@@ -117,12 +117,9 @@ def title_similarity(title1: str, title2: str) -> float:
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    """Check if a column exists in a table."""
-    try:
-        conn.execute(f"SELECT {column} FROM {table} LIMIT 1")  # noqa: S608
-        return True
-    except sqlite3.OperationalError:
-        return False
+    """Check if a column exists in a table using PRAGMA table_info."""
+    cursor = conn.execute(f"PRAGMA table_info({table})")  # noqa: S608
+    return any(row[1] == column for row in cursor.fetchall())
 
 
 def _get_schema_version(conn: sqlite3.Connection) -> int:
@@ -150,6 +147,8 @@ def _bootstrap_version(conn: sqlite3.Connection) -> int:
         return 3
     if not _column_exists(conn, "articles", "video_width"):
         return 4
+    if not _column_exists(conn, "articles", "video_height"):
+        return 5
     if not _column_exists(conn, "articles", "normalized_url"):
         return 6
     if not _column_exists(conn, "articles", "publish_fail_count"):
@@ -256,25 +255,27 @@ def init_database(db_path: str) -> sqlite3.Connection:
         ON seen_urls(created_at)
     """)
 
-    # Schema versioning
+    # Schema versioning — check BEFORE creating the table so we can detect
+    # existing databases that lack schema_version entirely
+    version = _get_schema_version(conn)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER NOT NULL
         )
     """)
 
-    version = _get_schema_version(conn)
-
     if version == -1:
-        # schema_version table just created — bootstrap from column detection
+        # No schema_version table existed — bootstrap from column detection
         version = _bootstrap_version(conn)
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
-    elif version == 0 and not _column_exists(conn, "articles", "id"):
-        # Truly fresh database — set to latest version
-        version = len(_MIGRATIONS)
-        conn.execute(
-            "UPDATE schema_version SET version = ?", (version,)
-        )
+    elif version == 0:
+        # schema_version exists but empty row — check if this is a fresh DB
+        cursor = conn.execute("SELECT COUNT(*) FROM schema_version")
+        if cursor.fetchone()[0] == 0:
+            # Fresh DB: all columns created by CREATE TABLE, skip migrations
+            version = len(_MIGRATIONS)
+            conn.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
 
     # Run pending migrations
     for i in range(version, len(_MIGRATIONS)):

@@ -117,11 +117,8 @@ async def _process_article(
             )
         return "duplicate"
 
-    # Check for similar titles (run in executor to avoid blocking event loop)
-    loop = asyncio.get_running_loop()
-    similar = await loop.run_in_executor(
-        None, find_similar_title, db_conn, article.title
-    )
+    # Check for similar titles (inline — shares SQLite conn with event loop)
+    similar = find_similar_title(db_conn, article.title)
     if similar:
         logger.debug(
             f"Similar title found: {article.title[:50]} ~ {similar.original_title[:50]}"

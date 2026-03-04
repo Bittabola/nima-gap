@@ -22,7 +22,8 @@ _token_stats = {
     "output_tokens": 0,
 }
 
-# Circuit breaker state
+# Circuit breaker state — shared between classify and translate since both
+# hit the same Gemini API; repeated failures in either indicate an API outage
 _consecutive_failures = 0
 CIRCUIT_BREAKER_THRESHOLD = 3
 
