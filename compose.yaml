@@ -3,6 +3,11 @@ services:
     image: git.fayzullaev.ca/bittabola/nima-gap:latest
     container_name: nima-gap
     restart: unless-stopped
+    # Route egress through the shared gluetun (Mullvad) container managed
+    # in ~/docker/gluetun/. That project must be up before this one;
+    # `restart: unless-stopped` handles transient gluetun downtime, since
+    # depends_on can't cross compose projects.
+    network_mode: "container:gluetun"
     env_file:
       - ${DEPLOY_DIR:-.}/.env
     volumes:
@@ -11,7 +16,19 @@ services:
     environment:
       - TZ=Asia/Tashkent
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/health || exit 1"]
+      # python-urllib used instead of wget (not in python:3.12-slim image).
+      # Runs inside the container but shares gluetun's network namespace,
+      # so localhost:8080 hits this bot's own health server.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request, sys
+          try:
+              urllib.request.urlopen("http://localhost:8080/health", timeout=3)
+          except Exception:
+              sys.exit(1)
       interval: 30s
       timeout: 10s
       retries: 3

@@ -46,6 +46,9 @@ jobs:
           mkdir -p ~/.ssh
           echo "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          scp -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key \
+            compose.yaml \
+            "${DEPLOY_USER}@${VPS_HOST}:docker/${DEPLOY_DIR}/compose.yaml"
           ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key "${DEPLOY_USER}@${VPS_HOST}" \
             "bash -c 'docker pull ${IMAGE} && cd ~/docker/${DEPLOY_DIR} && docker compose up -d'"
 
