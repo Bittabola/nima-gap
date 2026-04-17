@@ -42,24 +42,16 @@ cp .env.example .env
 python -m src.main
 ```
 
-### Docker Deployment
+### Deployment
 
-```bash
-# Clone and configure
-git clone https://github.com/Bittabola/nima-gap.git
-cd nima-gap
-cp .env.example .env
-# Edit .env with your credentials
+Deployment is automated via the Forgejo workflow in `.forgejo/workflows/deploy.yml`:
+pushing to `main` builds the image, pushes it to the registry, and `scp`s
+`compose.yaml` to the host, where `docker compose up -d` restarts the service.
 
-# Build and run
-docker compose -f docker/docker-compose.yml up -d
-
-# View logs
-docker compose -f docker/docker-compose.yml logs -f
-
-# Stop
-docker compose -f docker/docker-compose.yml down
-```
+The container uses `network_mode: "container:gluetun"` to route all egress
+through a shared Mullvad VPN sidecar managed in a separate repo. Running it
+outside the production host requires either provisioning that sidecar first or
+temporarily removing the `network_mode` directive.
 
 ## Configuration
 
@@ -71,7 +63,7 @@ docker compose -f docker/docker-compose.yml down
 | `TELEGRAM_CHANNEL_ID` | Yes | Channel to publish to (@username or ID) |
 | `TELEGRAM_ADMIN_ID` | Yes | Your Telegram user ID |
 | `GEMINI_API_KEY` | Yes | Google AI Studio API key |
-| `GEMINI_MODEL` | No | Gemini model to use (default: gemini-1.5-flash) |
+| `GEMINI_MODEL` | No | Gemini model to use (default: gemini-3-flash-preview) |
 | `DATABASE_PATH` | No | SQLite database path (default: data/olamda.db) |
 | `FETCH_INTERVAL_HOURS` | No | Hours between fetches (default: 3) |
 | `PUBLISH_GAP_MINUTES` | No | Minutes between publishes (default: 60) |

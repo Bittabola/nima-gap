@@ -4,15 +4,13 @@
 - `src/` contains the bot code (entry: `python -m src.main`).
 - `config/sources.yaml` lists RSS and Reddit sources.
 - `data/` stores the SQLite DB and downloaded media (videos/images).
-- `docker/` holds `Dockerfile` and `docker-compose.yml` for deployment.
+- `docker/Dockerfile` defines the image; `compose.yaml` at repo root is the deployed service definition.
 
 ## Build, Test, and Development Commands
 - Local setup (venv required): `python -m venv venv && source venv/bin/activate`
 - Install deps: `pip install -r requirements.txt`
 - Run bot: `python -m src.main`
-- Docker run: `docker compose -f docker/docker-compose.yml up -d`
-- Docker logs: `docker compose -f docker/docker-compose.yml logs -f`
-- Stop Docker: `docker compose -f docker/docker-compose.yml down`
+- Docker deployment is automated by `.forgejo/workflows/deploy.yml`; no manual `docker compose` steps needed on the host. For inspection, `cd ~/docker/nima-gap && docker compose logs -f` on the deploy host.
 
 ## Coding Style & Naming Conventions
 - Python 3.11+, async I/O throughout; keep functions typed.
